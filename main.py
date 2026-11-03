@@ -3,6 +3,7 @@ import datetime
 import os
 import sqlite3
 import aiohttp
+from zoneinfo import ZoneInfo
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, Message, InlineKeyboardMarkup, InlineKeyboardButton
@@ -11,6 +12,7 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
 # --- НАСТРОЙКИ ---
+# Берем токен из переменных окружения Render (или подставится запасной)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "9285635116:AAH9tk30qN2xAcdM-ChCtr0kSWKT5XEMPik")
 TARGET_IP = "176.36.251.189"
 
@@ -24,6 +26,10 @@ dp = Dispatcher()
 
 # Глобальная переменная для хранения времени последней проверки
 last_check_time = "Ещё не проводилась"
+
+def get_kyiv_time():
+    """Возвращает текущее точное время по Киеву (автоматически учитывает часовой пояс)"""
+    return datetime.datetime.now(ZoneInfo("Europe/Kiev")).strftime("%Y-%m-%d %H:%M:%S")
 
 def get_main_keyboard():
     return InlineKeyboardMarkup(
@@ -70,7 +76,7 @@ def get_all_users():
     return [row[0] for row in rows]
 
 def log_event(status):
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = get_kyiv_time()
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("INSERT INTO events (timestamp, status) VALUES (?, ?)", (now, status))
@@ -103,7 +109,7 @@ def format_duration(seconds):
 
 async def ping_target(ip):
     global last_check_time
-    last_check_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    last_check_time = get_kyiv_time()
     
     param = "-n" if os.name == "nt" else "-c"
     command = ["ping", param, "1", "-w", "3000" if os.name == "nt" else "3", ip]
@@ -140,7 +146,10 @@ def generate_chart():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
-    seven_days_ago = (datetime.datetime.now() - datetime.timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+    # Считаем дату 7 дней назад в киевском времени
+    now_kyiv = datetime.datetime.now(ZoneInfo("Europe/Kiev"))
+    seven_days_ago = (now_kyiv - datetime.timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+    
     cursor.execute("SELECT timestamp, status FROM events WHERE timestamp >= ? ORDER BY id ASC", (seven_days_ago,))
     rows = cursor.fetchall()
     conn.close()
@@ -151,7 +160,7 @@ def generate_chart():
 
     days_data = {}
     for i in range(7):
-        day = (datetime.datetime.now() - datetime.timedelta(days=6 - i)).date()
+        day = (now_kyiv - datetime.timedelta(days=6 - i)).date()
         days_data[day] = []
 
     for r in rows:
@@ -287,10 +296,10 @@ async def monitor_loop():
         if status:
             fails = 0
             if not is_online:
-                recovery_time_str = datetime.datetime.now().strftime("%H:%M")
+                recovery_time_str = datetime.datetime.now(ZoneInfo("Europe/Kiev")).strftime("%H:%M")
                 
                 if outage_start_time:
-                    down_duration = (datetime.datetime.now() - outage_start_time).total_seconds()
+                    down_duration = (datetime.datetime.now(ZoneInfo("Europe/Kiev")) - outage_start_time.replace(tzinfo=ZoneInfo("Europe/Kiev"))).total_seconds()
                 else:
                     down_duration = 60 
 
@@ -309,7 +318,7 @@ async def monitor_loop():
             print(f"[МОНИТОРИНГ] Пинг не прошёл! Сбой подряд: {fails}/{FAIL_THRESHOLD}")
             if is_online and fails >= FAIL_THRESHOLD:
                 is_online = False
-                outage_start_time = datetime.datetime.now()
+                outage_start_time = datetime.datetime.now(ZoneInfo("Europe/Kiev"))
                 log_event("OFFLINE")
 
                 current_time_str = outage_start_time.strftime("%H:%M")
