@@ -6,11 +6,12 @@ import aiohttp
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, Message, InlineKeyboardMarkup, InlineKeyboardButton
+from aiohttp import web
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
 # --- НАСТРОЙКИ ---
-BOT_TOKEN = "9285635116:AAH9tk30qN2xAcdM-ChCtr0kSWKT5XEMPik"
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9285635116:AAH9tk30qN2xAcdM-ChCtr0kSWKT5XEMPik")
 TARGET_IP = "176.36.251.189"
 
 CHECK_INTERVAL = 30
@@ -318,10 +319,28 @@ async def monitor_loop():
         print(f"[МОНИТОРИНГ] Ожидание следующей проверки ({CHECK_INTERVAL} сек.)...")
         await asyncio.sleep(CHECK_INTERVAL)
 
+# --- ВЕБ-СЕРВЕР ДЛЯ РАБОТЫ НА RENDER ---
+async def handle_web(request):
+    return web.Response(text="Power Bot Web Service is running!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_web)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"[WEB] Веб-сервер успешно запущен на порту {port}")
+
 async def main():
     print("[СТАРТ] Инициализация приложения...")
     init_db()
+    
+    # Запускаем веб-сервер для Render и фоновый мониторинг
+    await start_web_server()
     asyncio.create_task(monitor_loop())
+    
     print("[СТАРТ] Запуск пуллинга Telegram-бота...")
     await dp.start_polling(bot)
 
