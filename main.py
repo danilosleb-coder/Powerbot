@@ -111,21 +111,29 @@ async def ping_target(ip):
     global last_check_time
     last_check_time = get_kyiv_time()
     
-    param = "-n" if os.name == "nt" else "-c"
-    command = ["ping", param, "1", "-w", "3000" if os.name == "nt" else "3", ip]
     try:
-        process = await asyncio.create_subprocess_exec(
-            *command, 
-            stdout=asyncio.subprocess.DEVNULL, 
-            stderr=asyncio.subprocess.DEVNULL
+        # Пробуем подключиться по TCP к стандартному порту (например, 80 или 443) 
+        # или просто проверяем доступность IP через сокет
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(ip, 80), timeout=3
         )
-        await process.wait()
-        is_success = (process.returncode == 0)
-        print(f"[ПИНГ] Проверка {ip} -> {'Успешно (Свет есть)' if is_success else 'Неуспешно (Нет ответа)'}")
-        return is_success
-    except Exception as e:
-        print(f"[ПИНГ] Ошибка выполнения пинга: {e}")
-        return False
+        writer.close()
+        await writer.wait_closed()
+        print(f"[ПИНГ] Проверка {ip} -> Успешно (Свет есть)")
+        return True
+    except Exception:
+        try:
+            # Запасной вариант на случай другого порта (например, 53 DNS)
+            _, writer = await asyncio.wait_for(
+                asyncio.open_connection(ip, 53), timeout=3
+            )
+            writer.close()
+            await writer.wait_closed()
+            print(f"[ПИНГ] Проверка {ip} -> Успешно (Свет есть)")
+            return True
+        except Exception as e:
+            print(f"[ПИНГ] Ошибка подключения к {ip}: {e}")
+            return False
 
 # --- РАССЫЛКА СООБЩЕНИЙ ВСЕМ ПОЛЬЗОВАТЕЛЯМ ---
 async def broadcast_message(text, reply_markup=None, photo_path=None):
