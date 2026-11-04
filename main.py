@@ -3,6 +3,8 @@ import datetime
 import os
 import sqlite3
 import aiohttp
+import sys
+from collections import deque
 from ping3 import ping
 from zoneinfo import ZoneInfo
 from aiogram import Bot, Dispatcher, F
@@ -12,8 +14,23 @@ from aiohttp import web
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
+# --- БУФЕР ЛОГОВ ДЛЯ КОМАНДЫ /logs ---
+log_buffer = deque(maxlen=50)
+
+class LogInterceptor:
+    def __init__(self):
+        self.terminal = sys.stdout
+    def write(self, message):
+        self.terminal.write(message)
+        self.terminal.flush()
+        if message.strip():
+            log_buffer.append(message.strip())
+    def flush(self):
+        self.terminal.flush()
+
+sys.stdout = LogInterceptor()
+
 # --- НАСТРОЙКИ ---
-# Берем токен из переменных окружения Render (или подставится запасной)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "9285635116:AAH9tk30qN2xAcdM-ChCtr0kSWKT5XEMPik")
 TARGET_IP = "176.36.251.189"
 
@@ -59,7 +76,7 @@ def init_db():
     """)
     conn.commit()
     conn.close()
-    print("[БАЗА ДАННЫХ] Инициализация БД прошла успешно.")
+    print("[БАЗА ДАННЫХ] Инициализация БД прошла успешно.", flush=True)
 
 def add_user(chat_id):
     conn = sqlite3.connect(DB_FILE)
@@ -83,7 +100,7 @@ def log_event(status):
     cursor.execute("INSERT INTO events (timestamp, status) VALUES (?, ?)", (now, status))
     conn.commit()
     conn.close()
-    print(f"[БАЗА ДАННЫХ] Записано событие -> Статус: {status} | Время: {now}")
+    print(f"[БАЗА ДАННЫХ] Записано событие -> Статус: {status} | Время: {now}", flush=True)
 
 def get_last_event():
     conn = sqlite3.connect(DB_FILE)
@@ -113,14 +130,13 @@ async def ping_target(ip):
     last_check_time = get_kyiv_time()
     
     try:
-        # ping3 возвращает время ответа в секундах или None / False при ошибке
         response = ping(ip, timeout=3)
         is_success = response is not None and response is not False
         
-        print(f"[ПИНГ] Проверка {ip} -> {'Успешно (Свет есть)' if is_success else 'Неуспешно (Нет ответа)'}")
+        print(f"[ПИНГ] Проверка {ip} -> {'Успешно (Свет есть)' if is_success else 'Неуспешно (Нет ответа)'}", flush=True)
         return is_success
     except Exception as e:
-        print(f"[ПИНГ] Ошибка выполнения пинга: {e}")
+        print(f"[ПИНГ] Ошибка выполнения пинга: {e}", flush=True)
         return False
 
 # --- РАССЫЛКА СООБЩЕНИЙ ВСЕМ ПОЛЬЗОВАТЕЛЯМ ---
@@ -134,15 +150,14 @@ async def broadcast_message(text, reply_markup=None, photo_path=None):
             else:
                 await bot.send_message(chat_id=uid, text=text, reply_markup=reply_markup)
         except Exception as e:
-            print(f"[ОШИБКА] Не удалось отправить сообщение пользователю {uid}: {e}")
+            print(f"[ОШИБКА] Не удалось отправить сообщение пользователю {uid}: {e}", flush=True)
 
 # --- ГЕНЕРАЦИЯ ГРАФИКА ЗА 7 ДНЕЙ ---
 def generate_chart():
-    print("[ГРАФИК] Генерация графика за последние 7 дней...")
+    print("[ГРАФИК] Генерация графика за последние 7 дней...", flush=True)
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
-    # Считаем дату 7 дней назад в киевском времени
     now_kyiv = datetime.datetime.now(ZoneInfo("Europe/Kiev"))
     seven_days_ago = (now_kyiv - datetime.timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
     
@@ -151,7 +166,7 @@ def generate_chart():
     conn.close()
 
     if not rows:
-        print("[ГРАФИК] Недостаточно данных для генерации.")
+        print("[ГРАФИК] Недостаточно данных для генерации.", flush=True)
         return None
 
     days_data = {}
@@ -200,14 +215,14 @@ def generate_chart():
     chart_path = "power_chart_7days.png"
     plt.savefig(chart_path, dpi=150)
     plt.close()
-    print("[ГРАФИК] График успешно сохранен.")
+    print("[ГРАФИК] График успешно сохранен.", flush=True)
     return chart_path
 
 # --- ОБРАБОТКА КОМАНД И КНОПОК ---
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     add_user(message.chat.id)
-    print(f"[ТЕЛЕГРАМ] /start от пользователя: {message.chat.id}")
+    print(f"[ТЕЛЕГРАМ] /start от пользователя: {message.chat.id}", flush=True)
     await message.answer("⚡ Привет! Бот мониторинга сети успешно подключен.", reply_markup=get_main_keyboard())
 
 @dp.message(Command("status"))
@@ -258,6 +273,29 @@ async def send_chart_info(event_source):
             await event_source.message.answer(text, reply_markup=get_main_keyboard())
             await event_source.answer()
 
+@dp.message(Command("logs"))
+async def cmd_logs(message: Message):
+    add_user(message.chat.id)
+    if not log_buffer:
+        await message.answer("📭 Логи пока пусты.")
+        return
+    
+    logs_text = "\n".join(log_buffer)
+    if len(logs_text) < 4000:
+        await message.answer(f"📋 **Последние логи бота:**\n```text\n{logs_text}\n```", parse_mode="Markdown")
+    else:
+        file_path = "bot_logs.txt"
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(logs_text)
+        
+        with open(file_path, "rb") as f:
+            file_bytes = f.read()
+            
+        await message.answer_document(
+            BufferedInputFile(file_bytes, filename="bot_logs.txt"),
+            caption="📄 Логи работы бота за последнее время."
+        )
+
 @dp.callback_query(F.data.startswith("btn_"))
 async def process_callbacks(callback):
     add_user(callback.message.chat.id)
@@ -281,12 +319,12 @@ async def monitor_loop():
         log_event("ONLINE")
 
     fails = 0
-    print("[МОНИТОРИНГ] Цикл мониторинга запущен.")
+    print("[МОНИТОРИНГ] Цикл мониторинга запущен.", flush=True)
     add_user(982012863)
     await broadcast_message("⚡ Бот мониторинга сети успешно запущен.", reply_markup=get_main_keyboard())
 
     while True:
-        print(f"\n[МОНИТОРИНГ] Начинаю проверку IP {TARGET_IP}...")
+        print(f"\n[МОНИТОРИНГ] Начинаю проверку IP {TARGET_IP}...", flush=True)
         status = await ping_target(TARGET_IP)
 
         if status:
@@ -308,10 +346,10 @@ async def monitor_loop():
                 text = f"🟢 Свет появился в {recovery_time_str}. Света не было {duration_str}."
                 await broadcast_message(text, reply_markup=get_main_keyboard())
             else:
-                print("[МОНИТОРИНГ] Сеть стабильна, свет есть.")
+                print("[МОНИТОРИНГ] Сеть стабильна, свет есть.", flush=True)
         else:
             fails += 1
-            print(f"[МОНИТОРИНГ] Пинг не прошёл! Сбой подряд: {fails}/{FAIL_THRESHOLD}")
+            print(f"[МОНИТОРИНГ] Пинг не прошёл! Сбой подряд: {fails}/{FAIL_THRESHOLD}", flush=True)
             if is_online and fails >= FAIL_THRESHOLD:
                 is_online = False
                 outage_start_time = datetime.datetime.now(ZoneInfo("Europe/Kiev"))
@@ -321,7 +359,7 @@ async def monitor_loop():
                 text = f"🔴 Свет пропал в {current_time_str}."
                 await broadcast_message(text, reply_markup=get_main_keyboard())
 
-        print(f"[МОНИТОРИНГ] Ожидание следующей проверки ({CHECK_INTERVAL} сек.)...")
+        print(f"[МОНИТОРИНГ] Ожидание следующей проверки ({CHECK_INTERVAL} сек.)...", flush=True)
         await asyncio.sleep(CHECK_INTERVAL)
 
 # --- ВЕБ-СЕРВЕР ДЛЯ РАБОТЫ НА RENDER ---
@@ -336,17 +374,16 @@ async def start_web_server():
     port = int(os.getenv("PORT", 8080))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"[WEB] Веб-сервер успешно запущен на порту {port}")
+    print(f"[WEB] Веб-сервер успешно запущен на порту {port}", flush=True)
 
 async def main():
-    print("[СТАРТ] Инициализация приложения...")
+    print("[СТАРТ] Инициализация приложения...", flush=True)
     init_db()
     
-    # Запускаем веб-сервер для Render и фоновый мониторинг
     await start_web_server()
     asyncio.create_task(monitor_loop())
     
-    print("[СТАРТ] Запуск пуллинга Telegram-бота...")
+    print("[СТАРТ] Запуск пуллинга Telegram-бота...", flush=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
