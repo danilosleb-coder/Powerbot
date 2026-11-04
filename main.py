@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
 # --- БУФЕР ЛОГОВ ДЛЯ КОМАНДЫ /logs ---
-log_buffer = deque(maxlen=50)
+log_buffer = deque(maxlen=100)  # Увеличили буфер до 100 строк
 
 class LogInterceptor:
     def __init__(self):
@@ -23,8 +23,13 @@ class LogInterceptor:
     def write(self, message):
         self.terminal.write(message)
         self.terminal.flush()
-        if message.strip():
-            log_buffer.append(message.strip())
+        
+        text = message.strip()
+        if text:
+            # Добавляем киевское время [ЧЧ:ММ:СС] к каждой строчке лога
+            time_prefix = datetime.datetime.now(ZoneInfo("Europe/Kiev")).strftime("[%H:%M:%S]")
+            log_buffer.append(f"{time_prefix} {text}")
+            
     def flush(self):
         self.terminal.flush()
 
@@ -280,21 +285,17 @@ async def cmd_logs(message: Message):
         await message.answer("📭 Логи пока пусты.")
         return
     
+    # Формируем полный текст логов
     logs_text = "\n".join(log_buffer)
-    if len(logs_text) < 4000:
-        await message.answer(f"📋 **Последние логи бота:**\n```text\n{logs_text}\n```", parse_mode="Markdown")
-    else:
-        file_path = "bot_logs.txt"
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(logs_text)
-        
-        with open(file_path, "rb") as f:
-            file_bytes = f.read()
-            
-        await message.answer_document(
-            BufferedInputFile(file_bytes, filename="bot_logs.txt"),
-            caption="📄 Логи работы бота за последнее время."
-        )
+    
+    # Всегда отправляем удобным .txt файлом
+    file_bytes = logs_text.encode("utf-8")
+    filename = f"bot_logs_{datetime.datetime.now(ZoneInfo('Europe/Kiev')).strftime('%Y%m%d_%H%M%S')}.txt"
+    
+    await message.answer_document(
+        BufferedInputFile(file_bytes, filename=filename),
+        caption="📄 Файл с последними логами работы бота (с метками времени)."
+    )
 
 @dp.callback_query(F.data.startswith("btn_"))
 async def process_callbacks(callback):
