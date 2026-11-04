@@ -3,6 +3,7 @@ import datetime
 import os
 import sqlite3
 import aiohttp
+from ping3 import ping
 from zoneinfo import ZoneInfo
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -112,28 +113,15 @@ async def ping_target(ip):
     last_check_time = get_kyiv_time()
     
     try:
-        # Пробуем подключиться по TCP к стандартному порту (например, 80 или 443) 
-        # или просто проверяем доступность IP через сокет
-        _, writer = await asyncio.wait_for(
-            asyncio.open_connection(ip, 80), timeout=3
-        )
-        writer.close()
-        await writer.wait_closed()
-        print(f"[ПИНГ] Проверка {ip} -> Успешно (Свет есть)")
-        return True
-    except Exception:
-        try:
-            # Запасной вариант на случай другого порта (например, 53 DNS)
-            _, writer = await asyncio.wait_for(
-                asyncio.open_connection(ip, 53), timeout=3
-            )
-            writer.close()
-            await writer.wait_closed()
-            print(f"[ПИНГ] Проверка {ip} -> Успешно (Свет есть)")
-            return True
-        except Exception as e:
-            print(f"[ПИНГ] Ошибка подключения к {ip}: {e}")
-            return False
+        # ping3 возвращает время ответа в секундах или None / False при ошибке
+        response = ping(ip, timeout=3)
+        is_success = response is not None and response is not False
+        
+        print(f"[ПИНГ] Проверка {ip} -> {'Успешно (Свет есть)' if is_success else 'Неуспешно (Нет ответа)'}")
+        return is_success
+    except Exception as e:
+        print(f"[ПИНГ] Ошибка выполнения пинга: {e}")
+        return False
 
 # --- РАССЫЛКА СООБЩЕНИЙ ВСЕМ ПОЛЬЗОВАТЕЛЯМ ---
 async def broadcast_message(text, reply_markup=None, photo_path=None):
