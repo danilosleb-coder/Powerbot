@@ -208,7 +208,8 @@ async def broadcast_message(text, reply_markup=None, photo_path=None):
         except Exception as e:
             print(f"[ОШИБКА] Не удалось отправить сообщение {uid}: {e}", flush=True)
 
-# --- ГЕНЕРАЦИЯ ГРАФИКА ---
+# --- ГЕНЕРАЦИЯ ГРАФИКА (С ГАРАНТИРОВАННЫМ ЗАПОЛНЕНИЕМ ДНЕЙ) ---
+# --- ГЕНЕРАЦИЯ ГРАФИКА (ЖЕЛЕЗОБЕТОННОЕ СРАВНЕНИЕ ДАТ) ---
 def generate_chart():
     print("[ГРАФИК] Генерация графика за последние 7 дней...", flush=True)
     try:
@@ -227,6 +228,7 @@ def generate_chart():
             day_start = datetime.datetime.combine(day, datetime.time.min)
             day_end = datetime.datetime.combine(day, datetime.time.max)
 
+            # Строгое сравнение дат по .date()
             day_events = [r for r in rows if r[0].date() == day]
             ax.set_xlim(day_start, day_end)
 
@@ -235,6 +237,7 @@ def generate_chart():
                 ax.plot([day_start, day_end], [0.5, 0.5], color='#2c3e50', linewidth=3, alpha=0.6)
                 ax.fill_between([day_start, day_end], 0, 1, color='#2c3e50', alpha=0.2)
             else:
+                # Ищем последнее событие ДО начала этого дня для определения начального статуса
                 past_events = [r for r in rows if r[0] < day_start]
                 last_st = 0.5
                 if past_events:
@@ -256,13 +259,13 @@ def generate_chart():
                     
                     val = plot_statuses[i]
                     if val == 1:
-                        color = '#2ecc71' # Зеленый
+                        color = '#2ecc71' # Зеленый (Есть свет)
                         alpha = 0.3
                     elif val == 0:
-                        color = '#e74c3c' # Красный
+                        color = '#e74c3c' # Красный (Нет света)
                         alpha = 0.4
                     else:
-                        color = '#2c3e50' # Черный
+                        color = '#2c3e50' # Черный (Нет данных)
                         alpha = 0.5
 
                     ax.step(t_sub, s_sub, where='post', color=color, linewidth=3)
