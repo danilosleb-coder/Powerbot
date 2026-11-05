@@ -290,7 +290,7 @@ async def monitor_loop():
 
         await asyncio.sleep(CHECK_INTERVAL)
 
-# --- ВЕБ-СЕРВЕР И СВЕТЛЫЙ ДАШБОРД (7 СТРОК ПО ДНЯМ) ---
+# --- ВЕБ-СЕРВЕР И ДАШБОРД С РУССКИМИ ДНЯМИ НЕДЕЛИ И СТАТУСАМИ ---
 async def handle_root(request):
     return web.Response(text="Power Bot Web Service is running!")
 
@@ -309,33 +309,50 @@ async def handle_dashboard(request):
     now_kyiv = datetime.datetime.now(ZoneInfo("Europe/Kiev"))
     days = [(now_kyiv - datetime.timedelta(days=6 - i)) for i in range(7)]
     
+    ru_weekdays = {
+        0: 'Понедельник',
+        1: 'Вторник',
+        2: 'Среда',
+        3: 'Четверг',
+        4: 'Пятница',
+        5: 'Суббота',
+        6: 'Воскресенье'
+    }
+
     days_data = []
     for day in days:
         day_date = day.date()
         day_start = datetime.datetime.combine(day_date, datetime.time.min, tzinfo=ZoneInfo("Europe/Kiev"))
         
-        # Определяем статус на начало дня
+        # Проверяем, были ли вообще события до этого дня
         past_events = [r for r in rows if (r[0].replace(tzinfo=ZoneInfo("Europe/Kiev")) if r[0].tzinfo is None else r[0]) < day_start]
-        last_st = "ONLINE"
-        if past_events:
-            last_st = past_events[-1][1]
+        
+        if not past_events and not rows:
+            last_st = -1  # Нет инфы вообще (черный)
+        elif not past_events:
+            last_st = -1  # До первого события в БД нет инфы
+        else:
+            last_st = 1 if past_events[-1][1] == "ONLINE" else 0
         
         # События текущего дня
         day_events = [r for r in rows if (r[0].replace(tzinfo=ZoneInfo("Europe/Kiev")) if r[0].tzinfo is None else r[0]).date() == day_date]
         
-        points = [{"time": "00:00", "val": 1 if last_st == "ONLINE" else 0}]
+        points = [{"time": "00:00", "val": last_st}]
         current_st = last_st
         
         for ev in day_events:
             ev_time = ev[0].replace(tzinfo=ZoneInfo("Europe/Kiev")) if ev[0].tzinfo is None else ev[0]
             t_str = ev_time.strftime("%H:%M")
-            current_st = ev[1]
-            points.append({"time": t_str, "val": 1 if current_st == "ONLINE" else 0})
+            current_st = 1 if ev[1] == "ONLINE" else 0
+            points.append({"time": t_str, "val": current_st})
             
-        points.append({"time": "23:59", "val": 1 if current_st == "ONLINE" else 0})
+        points.append({"time": "23:59", "val": current_st})
         
+        weekday_name = ru_weekdays[day_date.weekday()]
+        date_str_formatted = f"{day_date.strftime('%d.%m')} ({weekday_name})"
+
         days_data.append({
-            "date_str": day_date.strftime("%d.%m"),
+            "date_str": date_str_formatted,
             "points": points
         })
 
@@ -353,8 +370,8 @@ async def handle_dashboard(request):
         <script src="https://telegram.org/js/telegram-web-app.js"></script>
     </head>
     <body class="bg-slate-50 text-slate-800 font-sans antialiased p-3 min-h-screen">
-        <div class="max-w-xl mx-auto space-y-2" id="charts-container">
-            <!-- Сюда динамически рендерятся 7 графиков по дням -->
+        <div class="max-w-xl mx-auto space-y-3" id="charts-container">
+            <!-- Рендеринг графиков -->
         </div>
 
         <script>
@@ -369,7 +386,7 @@ async def handle_dashboard(request):
                 card.className = 'bg-white border border-slate-200/80 rounded-xl p-2.5 shadow-sm';
                 card.innerHTML = `
                     <div class="flex justify-between items-center mb-1">
-                        <span class="text-xs font-bold text-slate-600">${{day.date_str}}</span>
+                        <span class="text-xs font-bold text-slate-700">${{day.date_str}}</span>
                     </div>
                     <div class="relative h-14 w-full">
                         <canvas id="chart_${{index}}"></canvas>
@@ -387,14 +404,34 @@ async def handle_dashboard(request):
                         labels: labels,
                         datasets: [{{
                             data: values,
-                            borderColor: '#10b981',
-                            backgroundColor: 'rgba(16, 185, 129, 0.12)',
                             borderWidth: 2,
                             stepped: true,
                             fill: true,
                             tension: 0,
                             pointRadius: 2,
-                            pointBackgroundColor: values.map(v => v === 1 ? '#10b981' : '#ef4444')
+                            segment: {{
+                                borderColor: ctx => {{
+                                    const v0 = ctx.p0.parsed.y;
+                                    const v1 = ctx.p1.parsed.y;
+                                    if (v0 === 1 && v1 === 1) return '#10b981'; // Зеленый
+                                    if (v0 === 0 && v1 === 0) return '#ef4444'; // Красный
+                                    if (v0 === -1 && v1 === -1) return '#0f172a'; // Черный (нет инфы)
+                                    return '#64748b';
+                                }},
+                                backgroundColor: ctx => {{
+                                    const v0 = ctx.p0.parsed.y;
+                                    const v1 = ctx.p1.parsed.y;
+                                    if (v0 === 1 && v1 === 1) return 'rgba(16, 185, 129, 0.15)';
+                                    if (v0 === 0 && v1 === 0) return 'rgba(239, 68, 68, 0.15)';
+                                    if (v0 === -1 && v1 === -1) return 'rgba(15, 23, 42, 0.15)';
+                                    return 'rgba(100, 116, 139, 0.15)';
+                                }}
+                            }},
+                            pointBackgroundColor: values.map(v => {{
+                                if (v === 1) return '#10b981';
+                                if (v === 0) return '#ef4444';
+                                return '#0f172a';
+                            }})
                         }}]
                     }},
                     options: {{
@@ -406,15 +443,16 @@ async def handle_dashboard(request):
                                 ticks: {{ color: '#64748b', font: {{ size: 9 }}, maxTicksLimit: 8 }}
                             }},
                             y: {{
-                                min: -0.1,
-                                max: 1.1,
+                                min: -1.2,
+                                max: 1.2,
                                 ticks: {{
                                     stepSize: 1,
                                     color: '#64748b',
-                                    font: {{ size: 9 }},
+                                    font: {{ size: 8 }},
                                     callback: function(value) {{
                                         if (value === 1) return 'Есть';
                                         if (value === 0) return 'Нет';
+                                        if (value === -1) return 'Нет инфы';
                                         return '';
                                     }}
                                 }},
@@ -429,7 +467,10 @@ async def handle_dashboard(request):
                                         return `${{day.date_str}} ${{context[0].label}}`;
                                     }},
                                     label: function(context) {{
-                                        return context.parsed.y === 1 ? ' Свет есть' : ' Света нет';
+                                        const y = context.parsed.y;
+                                        if (y === 1) return ' Свет есть';
+                                        if (y === 0) return ' Света нет';
+                                        return ' Нет информации';
                                     }}
                                 }}
                             }}
