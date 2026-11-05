@@ -310,7 +310,7 @@ async def monitor_loop():
 
         await asyncio.sleep(CHECK_INTERVAL)
 
-# --- ВЕБ-СЕРВЕР И ДАШБОРД С ТОЧНОЙ ЛОГИКОЙ СТРЕЛОК ---
+# --- ВЕБ-СЕРВЕР И ДАШБОРД С АККОРДЕОНОМ И КЛИКОМ ПО ШКАЛЕ ---
 async def handle_root(request):
     return web.Response(text="Power Bot Web Service is running!")
 
@@ -365,6 +365,7 @@ async def handle_dashboard(request):
             raw_days_stats.append({
                 "date_str": date_str_formatted,
                 "segments": [],
+                "details": [],
                 "offline_mins": None,
                 "online_mins": None,
                 "avg_ping": None,
@@ -384,6 +385,7 @@ async def handle_dashboard(request):
             raw_days_stats.append({
                 "date_str": date_str_formatted,
                 "segments": [],
+                "details": [],
                 "offline_mins": None,
                 "online_mins": None,
                 "avg_ping": None,
@@ -404,9 +406,15 @@ async def handle_dashboard(request):
 
         current_min = 0.0
         css_segments = []
+        details_list = []
         offline_mins = 0.0
         online_mins = 0.0
         has_data = (current_st is not None) or (len(day_events) > 0)
+
+        def min_to_str(m):
+            hh = int(m // 60)
+            mm = int(m % 60)
+            return f"{hh:02d}:{mm:02d}"
 
         for ev_min, st in day_events:
             if ev_min > current_min:
@@ -414,13 +422,31 @@ async def handle_dashboard(request):
                     dur = ev_min - current_min
                     if current_st == "ONLINE":
                         online_mins += dur
+                        st_name = "Свет был"
+                        st_color = "text-emerald-600"
                     else:
                         offline_mins += dur
+                        st_name = "Света не было"
+                        st_color = "text-red-500"
                     
                     width_pct = (dur / 1440.0) * 100
                     left_pct = (current_min / 1440.0) * 100
                     bg_color = "#90f59a" if current_st == "ONLINE" else "#f07a7a"
-                    css_segments.append({"left": left_pct, "width": width_pct, "color": bg_color})
+                    
+                    start_t = min_to_str(current_min)
+                    end_t = min_to_str(ev_min)
+                    
+                    css_segments.append({
+                        "left": left_pct, 
+                        "width": width_pct, 
+                        "color": bg_color,
+                        "text": f"{st_name}: с {start_t} до {end_t} ({format_time_readable(dur)})"
+                    })
+                    details_list.append({
+                        "text": f"{st_name} с {start_t} до {end_t}",
+                        "dur": format_time_readable(dur),
+                        "color_class": st_color
+                    })
                 current_min = ev_min
             current_st = st
             
@@ -429,13 +455,31 @@ async def handle_dashboard(request):
                 dur = end_limit_min - current_min
                 if current_st == "ONLINE":
                     online_mins += dur
+                    st_name = "Свет был"
+                    st_color = "text-emerald-600"
                 else:
                     offline_mins += dur
+                    st_name = "Света не было"
+                    st_color = "text-red-500"
 
                 width_pct = (dur / 1440.0) * 100
                 left_pct = (current_min / 1440.0) * 100
                 bg_color = "#90f59a" if current_st == "ONLINE" else "#f07a7a"
-                css_segments.append({"left": left_pct, "width": width_pct, "color": bg_color})
+                
+                start_t = min_to_str(current_min)
+                end_t = min_to_str(end_limit_min)
+                
+                css_segments.append({
+                    "left": left_pct, 
+                    "width": width_pct, 
+                    "color": bg_color,
+                    "text": f"{st_name}: с {start_t} до {end_t} ({format_time_readable(dur)})"
+                })
+                details_list.append({
+                    "text": f"{st_name} с {start_t} до {end_t}",
+                    "dur": format_time_readable(dur),
+                    "color_class": st_color
+                })
 
         day_pings = []
         for pr in ping_rows:
@@ -448,6 +492,7 @@ async def handle_dashboard(request):
         raw_days_stats.append({
             "date_str": date_str_formatted,
             "segments": css_segments,
+            "details": details_list,
             "offline_mins": offline_mins if has_data else None,
             "online_mins": online_mins if has_data else None,
             "avg_ping": avg_ping,
@@ -485,6 +530,7 @@ async def handle_dashboard(request):
         days_data.append({
             "date_str": curr["date_str"],
             "segments": curr["segments"],
+            "details": curr["details"],
             "offline_str": format_time_readable(curr["offline_mins"]) if curr["has_data"] else "--//--",
             "online_str": format_time_readable(curr["online_mins"]) if curr["has_data"] else "--//--",
             "ping_str": f"{curr['avg_ping']} мс" if curr["avg_ping"] is not None else "--//--",
@@ -517,18 +563,35 @@ async def handle_dashboard(request):
             const daysData = {days_json};
             const container = document.getElementById('cards-container');
 
-            daysData.forEach((day) => {{
+            daysData.forEach((day, index) => {{
                 const card = document.createElement('div');
                 card.className = 'bg-white border border-slate-200 rounded-2xl p-4 shadow-sm';
                 
                 let segmentsHtml = '';
                 day.segments.forEach(seg => {{
-                    segmentsHtml += `<div class="absolute h-full top-0 transition-all" style="left: ${{seg.left}}%; width: ${{seg.width}}%; background-color: ${{seg.color}};"></div>`;
+                    segmentsHtml += `<div class="absolute h-full top-0 transition-opacity active:opacity-75 cursor-pointer" style="left: ${{seg.left}}%; width: ${{seg.width}}%; background-color: ${{seg.color}};" onclick="showToast(event, '${{seg.text}}')"></div>`;
                 }});
 
+                let detailsHtml = '';
+                if (day.details.length > 0) {{
+                    day.details.forEach(det => {{
+                        detailsHtml += `
+                            <div class="flex justify-between items-center text-xs py-1 border-b border-slate-100 last:border-0">
+                                <span class="font-medium ${{det.color_class}}">${{det.text}}</span>
+                                <span class="text-slate-500 font-semibold">${{det.dur}}</span>
+                            </div>
+                        `;
+                    }});
+                }} else {{
+                    detailsHtml = '<div class="text-xs text-slate-400 text-center py-1">Нет подробных данных</div>';
+                }}
+
                 card.innerHTML = `
-                    <div class="flex justify-between items-center mb-2">
+                    <div class="flex justify-between items-center mb-2 cursor-pointer select-none" onclick="toggleAccordion(${{index}})">
                         <span class="text-sm font-bold text-slate-800">${{day.date_str}}</span>
+                        <svg id="arrow_${{index}}" class="w-4 h-4 text-slate-400 transition-transform duration-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                        </svg>
                     </div>
                     <!-- Шкала времени -->
                     <div class="relative h-10 w-full bg-white border border-slate-200 rounded-xl overflow-hidden shadow-inner flex">
@@ -542,7 +605,15 @@ async def handle_dashboard(request):
                         <span>18:00</span>
                         <span>23:59</span>
                     </div>
-                    <!-- Статистика со строгой цветовой логикой стрелок -->
+                    <!-- Интерактивная всплывающая плашка по клику на шкалу -->
+                    <div id="toast_${{index}}" class="hidden mt-2 p-2 bg-slate-800 text-white text-xs rounded-lg text-center font-medium animate-pulse"></div>
+
+                    <!-- Выпадающий аккордеон с деталями -->
+                    <div id="accordion_${{index}}" class="hidden mt-3 pt-2 border-t border-slate-100 space-y-1">
+                        ${{detailsHtml}}
+                    </div>
+
+                    <!-- Статистика -->
                     <div class="mt-3 pt-3 border-t border-slate-100 grid grid-cols-3 gap-2 text-center">
                         <div class="bg-slate-50 p-2 rounded-xl">
                             <span class="text-[10px] text-slate-400 block font-medium">Света не было</span>
@@ -561,9 +632,37 @@ async def handle_dashboard(request):
                 container.appendChild(card);
             }});
 
+            function toggleAccordion(index) {{
+                const acc = document.getElementById(`accordion_${{index}}`);
+                const arrow = document.getElementById(`arrow_${{index}}`);
+                if (acc.classList.contains('hidden')) {{
+                    acc.classList.remove('hidden');
+                    arrow.classList.add('rotate-180');
+                }} else {{
+                    acc.classList.add('hidden');
+                    arrow.classList.remove('rotate-180');
+                }}
+            }}
+
+            function showToast(event, text) {{
+                event.stopPropagation();
+                const card = event.target.closest('.bg-white');
+                const toasts = document.querySelectorAll('[id^="toast_"]');
+                toasts.forEach(t => t.classList.add('hidden'));
+
+                const toast = card.querySelector('[id^="toast_"]');
+                toast.innerText = text;
+                toast.classList.remove('hidden');
+
+                setTimeout(() => {{
+                    toast.classList.add('hidden');
+                }}, 4000);
+            }}
+
             setTimeout(() => {{
                 location.reload();
             }}, 30000);
+
         </script>
     </body>
     </html>
