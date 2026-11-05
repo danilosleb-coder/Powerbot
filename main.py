@@ -193,7 +193,7 @@ async def broadcast_message(text, reply_markup=None, photo_path=None):
         except Exception as e:
             print(f"[ОШИБКА] Не удалось отправить сообщение {uid}: {e}", flush=True)
 
-# --- ГЕНЕРАЦИЯ ГРАФИКА (ЕДИНОЕ ОФОРМЛЕНИЕ ДЛЯ ВСЕХ НЕИЗВЕСТНЫХ УЧАСТКОВ) ---
+# --- ГЕНЕРАЦИЯ ГРАФИКА (ЖЕЛЕЗОБЕТОННЫЙ ЕДИНЫЙ СТИЛЬ) ---
 def generate_chart():
     print("[ГРАФИК] Генерация графика за последние 7 дней...", flush=True)
     try:
@@ -221,11 +221,10 @@ def generate_chart():
             plot_statuses = []
 
             if not day_events:
-                # Если за день нет вообще записей — рисуем ровную полосу «Нет данных» (0.5) на весь день
+                # Жестко задаем линию «Нет данных» (0.5) на весь день, если записей нет
                 plot_times = [day_start, day_end]
                 plot_statuses = [0.5, 0.5]
             else:
-                # Если события есть, сможем восстановить статус до первого события
                 cursor.execute("SELECT status FROM events WHERE timestamp < %s ORDER BY timestamp DESC LIMIT 1;", (day_start,))
                 prev_ev = cursor.fetchone()
                 
@@ -241,20 +240,20 @@ def generate_chart():
                 plot_times.append(day_end)
                 plot_statuses.append(plot_statuses[-1])
 
-            # Отрисовка всех сегментов в едином стиле
+            # Отрисовка всех сегментов
             for i in range(len(plot_times) - 1):
                 t_sub = [plot_times[i], plot_times[i+1]]
                 s_sub = [plot_statuses[i], plot_statuses[i+1]]
                 
                 val = plot_statuses[i]
                 if val == 1:
-                    color = '#2ecc71' # Зеленый (Есть свет)
+                    color = '#2ecc71' # Зеленый
                     alpha = 0.3
                 elif val == 0:
-                    color = '#e74c3c' # Красный (Нет света)
+                    color = '#e74c3c' # Красный
                     alpha = 0.4
                 else:
-                    color = '#2c3e50' # Черный/Серый (Нет данных)
+                    color = '#2c3e50' # Черный / Серый (Нет данных)
                     alpha = 0.5
 
                 ax.step(t_sub, s_sub, where='post', color=color, linewidth=3)
