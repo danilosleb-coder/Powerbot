@@ -9,8 +9,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiohttp import web
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
+import plotly.graph_objects as go
 import psycopg2
 
 # --- БУФЕР ЛОГІВ ---
@@ -118,7 +117,6 @@ def get_all_users():
         print(f"[ОШИБКА БД] Не удалось получить список пользователей: {e}", flush=True)
         return []
 
-# Обычная функция логирования (с отправкой СМС в Telegram)
 def log_event(status):
     now = datetime.datetime.now(ZoneInfo("Europe/Kiev")).strftime("%Y-%m-%d %H:%M:%S")
     try:
@@ -132,7 +130,6 @@ def log_event(status):
     except Exception as e:
         print(f"[ОШИБКА БД] Не удалось записать событие: {e}", flush=True)
 
-# ТИХАЯ бэкенд-функция (ТОЛЬКО запись в БД, БЕЗ отправки в Telegram)
 def log_event_silent(status, custom_time=None):
     now = custom_time if custom_time else datetime.datetime.now(ZoneInfo("Europe/Kiev")).strftime("%Y-%m-%d %H:%M:%S")
     try:
@@ -208,89 +205,111 @@ async def broadcast_message(text, reply_markup=None, photo_path=None):
         except Exception as e:
             print(f"[ОШИБКА] Не удалось отправить сообщение {uid}: {e}", flush=True)
 
-# --- ГЕНЕРАЦИЯ ГРАФИКА (С ГАРАНТИРОВАННЫМ ЗАПОЛНЕНИЕМ ДНЕЙ) ---
-# --- ГЕНЕРАЦИЯ ГРАФИКА (ЖЕЛЕЗОБЕТОННОЕ СРАВНЕНИЕ ДАТ) ---
+# --- ГЕНЕРАЦИЯ ГРАФИКА ЧЕРЕЗ PLOTLY ---
 def generate_chart():
-    print("[ГРАФИК] Генерация графика за последние 7 дней...", flush=True)
+    print("[ГРАФИК] Генерация графика Plotly за последние 7 дней...", flush=True)
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        
         cursor.execute("SELECT timestamp, status FROM events ORDER BY timestamp ASC;")
         rows = cursor.fetchall()
-
-        now_kyiv = datetime.datetime.now(ZoneInfo("Europe/Kiev"))
-        days = [(now_kyiv - datetime.timedelta(days=6 - i)).date() for i in range(7)]
-        fig, axes = plt.subplots(7, 1, figsize=(10, 10), sharex=True)
-
-        for idx, day in enumerate(days):
-            ax = axes[idx]
-            day_start = datetime.datetime.combine(day, datetime.time.min)
-            day_end = datetime.datetime.combine(day, datetime.time.max)
-
-            # Строгое сравнение дат по .date()
-            day_events = [r for r in rows if r[0].date() == day]
-            ax.set_xlim(day_start, day_end)
-
-            if not day_events:
-                # Если за день вообще нет записей — рисуем ровную линию «Нет данных» (0.5)
-                ax.plot([day_start, day_end], [0.5, 0.5], color='#2c3e50', linewidth=3, alpha=0.6)
-                ax.fill_between([day_start, day_end], 0, 1, color='#2c3e50', alpha=0.2)
-            else:
-                # Ищем последнее событие ДО начала этого дня для определения начального статуса
-                past_events = [r for r in rows if r[0] < day_start]
-                last_st = 0.5
-                if past_events:
-                    last_st = 1 if past_events[-1][1] == "ONLINE" else 0
-
-                plot_times = [day_start]
-                plot_statuses = [last_st]
-
-                for ev in day_events:
-                    plot_times.append(ev[0])
-                    plot_statuses.append(1 if ev[1] == "ONLINE" else 0)
-
-                plot_times.append(day_end)
-                plot_statuses.append(plot_statuses[-1])
-
-                for i in range(len(plot_times) - 1):
-                    t_sub = [plot_times[i], plot_times[i+1]]
-                    s_sub = [plot_statuses[i], plot_statuses[i+1]]
-                    
-                    val = plot_statuses[i]
-                    if val == 1:
-                        color = '#2ecc71' # Зеленый (Есть свет)
-                        alpha = 0.3
-                    elif val == 0:
-                        color = '#e74c3c' # Красный (Нет света)
-                        alpha = 0.4
-                    else:
-                        color = '#2c3e50' # Черный (Нет данных)
-                        alpha = 0.5
-
-                    ax.step(t_sub, s_sub, where='post', color=color, linewidth=3)
-                    ax.fill_between(t_sub, s_sub, step='post', color=color, alpha=alpha)
-
-            ax.set_yticks([0, 0.5, 1])
-            ax.set_yticklabels(["Нет", "Нет данных", "Есть"], fontsize=8)
-            ax.set_ylim(-0.1, 1.1)
-            ax.set_ylabel(day.strftime("%d.%m"), fontsize=9, rotation=0, labelpad=30, va='center')
-            ax.grid(True, linestyle="--", alpha=0.5)
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-
         cursor.close()
         conn.close()
 
-        plt.suptitle("График наличия света за последние 7 дней", fontsize=14, fontweight="bold", y=0.98)
-        plt.tight_layout()
+        now_kyiv = datetime.datetime.now(ZoneInfo("Europe/Kiev"))
+        days = [(now_kyiv - datetime.timedelta(days=6 - i)).date() for i in range(7)]
+        
+        fig = go.Figure()
+
+        # Цветовая гамма
+        colors = {
+            "ONLINE": "#2ecc71",   # Зеленый
+            "OFFLINE": "#e74c3c",  # Красный
+            "UNKNOWN": "#2c3e50"   # Серый / Черный (Нет данных)
+        }
+
+        for idx, day in enumerate(days):
+            day_start = datetime.datetime.combine(day, datetime.time.min)
+            day_end = datetime.datetime.combine(day, datetime.time.max)
+            day_label = day.strftime("%d.%m")
+
+            day_events = [r for r in rows if r[0].date() == day]
+
+            if not day_events:
+                # Если за день нет вообще записей — рисуем один сплошной блок «Нет данных»
+                fig.add_trace(go.Bar(
+                    x=[datetime.timedelta(hours=24)],
+                    y=[day_label],
+                    orientation='h',
+                    base=[day_start],
+                    marker=dict(color=colors["UNKNOWN"], opacity=0.6),
+                    showlegend=False,
+                    hoverinfo='skip'
+                ))
+            else:
+                # Определяем статус до начала дня
+                past_events = [r for r in rows if r[0] < day_start]
+                last_st = "UNKNOWN"
+                if past_events:
+                    last_st = past_events[-1][1]
+
+                # Формируем интервалы внутри дня
+                intervals = []
+                current_time = day_start
+                current_status = last_st
+
+                for ev in day_events:
+                    ev_time = ev[0]
+                    if ev_time > current_time:
+                        intervals.append((current_time, ev_time, current_status))
+                    current_time = ev_time
+                    current_status = ev[1]
+
+                if current_time < day_end:
+                    intervals.append((current_time, day_end, current_status))
+
+                # Добавляем каждый интервал на график
+                for start_t, end_t, status in intervals:
+                    duration = end_t - start_t
+                    color = colors.get(status, colors["UNKNOWN"])
+                    fig.add_trace(go.Bar(
+                        x=[duration],
+                        y=[day_label],
+                        orientation='h',
+                        base=[start_t],
+                        marker=dict(color=color, opacity=0.7),
+                        showlegend=False,
+                        hoverinfo='skip'
+                    ))
+
+        # Настройка внешнего вида (современный дашборд)
+        fig.update_layout(
+            title=dict(text="<b>График наличия света за последние 7 дней</b>", x=0.5, font=dict(size=16)),
+            xaxis=dict(
+                type='date',
+                tickformat='%H:%M',
+                range=[datetime.datetime.combine(days[0], datetime.time.min), datetime.datetime.combine(days[-1], datetime.time.max)],
+                gridcolor='lightgray'
+            ),
+            yaxis=dict(
+                title="",
+                categoryorder='array',
+                categoryarray=[d.strftime("%d.%m") for d in days]
+            ),
+            barmode='stack',
+            plot_bgcolor='white',
+            paper_bgcolor='white',
+            margin=dict(l=50, r=20, t=50, b=50),
+            height=600,
+            width=900
+        )
 
         chart_path = "power_chart_7days.png"
-        plt.savefig(chart_path, dpi=150)
-        plt.close()
-        print("[ГРАФИК] График успешно сохранен.", flush=True)
+        fig.write_image(chart_path, scale=2)
+        print("[ГРАФИК] График Plotly успешно сохранен.", flush=True)
         return chart_path
     except Exception as e:
-        print(f"[ОШИБКА ГРАФИКА] Не удалось сгенерировать график: {e}", flush=True)
+        print(f"[ОШИБКА ГРАФИКА PLOTLY] Не удалось сгенерировать график: {e}", flush=True)
         return None
 
 # --- ОБРАБОТКА КОМАНД И КНОПОК ---
@@ -383,7 +402,7 @@ async def monitor_loop():
 
                 duration_str = format_duration(down_duration)
                 is_online = True
-                log_event("ONLINE") # Реальное изменение со СМС в чат
+                log_event("ONLINE") 
                 outage_start_time = None
 
                 text = f"🟢 Свет появился в {recovery_time_str}. Света не было {duration_str}."
@@ -396,7 +415,7 @@ async def monitor_loop():
             if is_online and fails >= FAIL_THRESHOLD:
                 is_online = False
                 outage_start_time = datetime.datetime.now(ZoneInfo("Europe/Kiev"))
-                log_event("OFFLINE") # Реальное изменение со СМС в чат
+                log_event("OFFLINE") 
 
                 current_time_str = outage_start_time.strftime("%H:%M")
                 text = f"🔴 Свет пропал в {current_time_str}."
