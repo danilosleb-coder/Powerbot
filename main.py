@@ -7,10 +7,11 @@ from zoneinfo import ZoneInfo
 from ping3 import ping
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import BufferedInputFile, Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import (
+    BufferedInputFile, Message, ReplyKeyboardMarkup, KeyboardButton,
+    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, WebAppInfo
+)
 from aiohttp import web
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 import psycopg2
 
 # --- БУФЕР ЛОГІВ ---
@@ -38,6 +39,7 @@ sys.stdout = LogInterceptor()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "9285635116:AAH9tk30qN2xAcdM-ChCtr0kSWKT5XEMPik")
 TARGET_IP = "176.36.251.189"
 DATABASE_URL = os.getenv("DATABASE_URL")
+WEB_APP_URL = os.getenv("WEB_APP_URL", "https://powerbot-q183.onrender.com/dashboard")
 
 CHECK_INTERVAL = 30
 FAIL_THRESHOLD = 2
@@ -58,9 +60,16 @@ def get_db_connection():
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📊 Статус"), KeyboardButton(text="📈 График за 7 дней")]
+            [KeyboardButton(text="📊 Статус"), KeyboardButton(text="📈 Веб-Дашборд 🌐")]
         ],
         resize_keyboard=True
+    )
+
+def get_dashboard_inline_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🚀 Открыть интерактивный дашборд", web_app=WebAppInfo(url=WEB_APP_URL))]
+        ]
     )
 
 def get_logs_keyboard():
@@ -194,109 +203,20 @@ async def ping_target(ip):
         print(f"[ПИНГ] Ошибка выполнения пинга: {e}", flush=True)
         return False
 
-async def broadcast_message(text, reply_markup=None, photo_path=None):
+async def broadcast_message(text, reply_markup=None):
     users = get_all_users()
     for uid in users:
         try:
-            if photo_path and os.path.exists(photo_path):
-                photo = BufferedInputFile.from_file(photo_path)
-                await bot.send_photo(chat_id=uid, photo=photo, caption=text, reply_markup=reply_markup)
-            else:
-                await bot.send_message(chat_id=uid, text=text, reply_markup=reply_markup)
+            await bot.send_message(chat_id=uid, text=text, reply_markup=reply_markup)
         except Exception as e:
             print(f"[ОШИБКА] Не удалось отправить сообщение {uid}: {e}", flush=True)
-
-# --- ГЕНЕРАЦИЯ ГРАФИКА (СУПЕР-ЧИТАЕМЫЙ ВИД: 7 СТРОК, КАЖДАЯ ОТ 00:00 ДО 23:59) ---
-def generate_chart():
-    print("[ГРАФИК] Генерация чистого таймлайна по дням...", flush=True)
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT timestamp, status FROM events ORDER BY timestamp ASC;")
-        rows = cursor.fetchall()
-        cursor.close()
-        conn.close()
-
-        now_kyiv = datetime.datetime.now(ZoneInfo("Europe/Kiev"))
-        # 7 дней: от 6 дней назад до сегодня
-        days = [(now_kyiv - datetime.timedelta(days=6 - i)).date() for i in range(7)]
-        
-        fig, axes = plt.subplots(7, 1, figsize=(12, 10), sharex=True)
-
-        colors = {
-            "ONLINE": "#2ecc71",   # Зеленый (Есть свет)
-            "OFFLINE": "#e74c3c",  # Красный (Нет света)
-            "UNKNOWN": "#2c3e50"   # Серый (Нет данных)
-        }
-
-        for idx, day in enumerate(days):
-            ax = axes[idx]
-            day_start = datetime.datetime.combine(day, datetime.time.min)
-            day_end = datetime.datetime.combine(day, datetime.time.max)
-
-            ax.set_xlim(day_start, day_end)
-            ax.set_ylim(0, 1)
-
-            day_events = [r for r in rows if r[0].date() == day]
-
-            if not day_events:
-                # Если за день вообще нет записей — заливаем весь день серым (Нет данных)
-                ax.axvspan(day_start, day_end, color=colors["UNKNOWN"], alpha=0.3)
-            else:
-                # Определяем статус на начало дня (берем последнее событие до начала этого дня)
-                past_events = [r for r in rows if r[0] < day_start]
-                last_st = "UNKNOWN"
-                if past_events:
-                    last_st = past_events[-1][1]
-
-                # Собираем интервалы
-                intervals = []
-                current_time = day_start
-                current_status = last_st
-
-                for ev in day_events:
-                    ev_time = ev[0]
-                    if ev_time > current_time:
-                        intervals.append((current_time, ev_time, current_status))
-                    current_time = ev_time
-                    current_status = ev[1]
-
-                if current_time < day_end:
-                    intervals.append((current_time, day_end, current_status))
-
-                # Рисуем каждый интервал на шкале этого дня
-                for start_t, end_t, status in intervals:
-                    color = colors.get(status, colors["UNKNOWN"])
-                    ax.axvspan(start_t, end_t, color=color, alpha=0.6)
-
-            # Настройка оси Y для каждого дня
-            ax.set_yticks([0.5])
-            ax.set_yticklabels([day.strftime("%d.%m")], fontsize=10, fontweight="bold")
-            ax.grid(True, linestyle="--", alpha=0.4, axis='x')
-            ax.tick_params(left=False, labelleft=True)
-
-        # Форматирование общей оси X внизу (часы от 00:00 до 23:59)
-        axes[-1].xaxis.set_major_formatter(mdates.DateFormatter('%H:%M', tz=ZoneInfo("Europe/Kiev")))
-        axes[-1].xaxis.set_major_locator(mdates.HourLocator(interval=3))
-
-        plt.suptitle("График наличия света за последние 7 дней", fontsize=14, fontweight="bold", y=0.95)
-        plt.tight_layout()
-        
-        chart_path = "power_chart_7days.png"
-        plt.savefig(chart_path, dpi=150)
-        plt.close()
-        
-        print("[ГРАФИК] График успешно сгенерирован в классическом формате.", flush=True)
-        return chart_path
-    except Exception as e:
-        print(f"[ОШИБКА ГРАФИКА] {e}", flush=True)
-        return None
 
 # --- ОБРАБОТКА КОМАНД И КНОПОК ---
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     add_user(message.chat.id)
-    await message.answer("⚡ Привет! Бот мониторинга сети успешно подключен.", reply_markup=get_main_keyboard())
+    await message.answer("⚡ Привет! Бот мониторинга сети успешно подключен. Нажми кнопку ниже, чтобы открыть интерактивный дашборд:", reply_markup=get_main_keyboard())
+    await message.answer("👇 Запуск панели управления:", reply_markup=get_dashboard_inline_keyboard())
 
 @dp.message(F.text == "📊 Статус")
 @dp.message(Command("status"))
@@ -311,17 +231,11 @@ async def cmd_status(message: Message):
         text = f"Текущий статус: {st_text}\nСвет {'есть' if status == 'ONLINE' else 'отсутствует'} с: {t}\nПоследняя проверка: {last_check_time}"
     await message.answer(text, reply_markup=get_main_keyboard())
 
-@dp.message(F.text == "📈 График за 7 дней")
+@dp.message(F.text == "📈 Веб-Дашборд 🌐")
 @dp.message(Command("chart"))
 async def cmd_chart(message: Message):
     add_user(message.chat.id)
-    chart_file = generate_chart()
-    caption = "📈 График наличия света по дням (последние 7 дней):"
-    if chart_file and os.path.exists(chart_file):
-        photo = BufferedInputFile.from_file(chart_file)
-        await message.answer_photo(photo=photo, caption=caption, reply_markup=get_main_keyboard())
-    else:
-        await message.answer("Недостаточно данных для построения графика.", reply_markup=get_main_keyboard())
+    await message.answer("📊 Открой интерактивный дашборд в один клик:", reply_markup=get_dashboard_inline_keyboard())
 
 @dp.message(Command("logs"))
 async def cmd_logs(message: Message):
@@ -368,7 +282,6 @@ async def monitor_loop():
     print("[МОНИТОРИНГ] Цикл мониторинга запущен.", flush=True)
 
     while True:
-        print(f"\n[МОНИТОРИНГ] Начинаю проверку IP {TARGET_IP}...", flush=True)
         status = await ping_target(TARGET_IP)
 
         if status:
@@ -388,10 +301,9 @@ async def monitor_loop():
                 text = f"🟢 Свет появился в {recovery_time_str}. Света не было {duration_str}."
                 await broadcast_message(text, reply_markup=get_main_keyboard())
             else:
-                print("[МОНИТОРИНГ] Сеть стабильна, свет есть.", flush=True)
+                pass
         else:
             fails += 1
-            print(f"[МОНИТОРИНГ] Сбой пинга: {fails}/{FAIL_THRESHOLD}", flush=True)
             if is_online and fails >= FAIL_THRESHOLD:
                 is_online = False
                 outage_start_time = datetime.datetime.now(ZoneInfo("Europe/Kiev"))
@@ -403,18 +315,156 @@ async def monitor_loop():
 
         await asyncio.sleep(CHECK_INTERVAL)
 
-async def handle_web(request):
+# --- ВЕБ-СЕРВЕР И ИНТЕРАКТИВНЫЙ ДАШБОРД (WEB APP) ---
+async def handle_root(request):
     return web.Response(text="Power Bot Web Service is running!")
+
+async def handle_dashboard(request):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT timestamp, status FROM events ORDER BY timestamp ASC;")
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        # Форматируем данные для графиков JS
+        labels = []
+        data_points = []
+        for r in rows:
+            t_str = r[0].strftime("%Y-%m-%d %H:%M:%S") if isinstance(r[0], datetime.datetime) else str(r[0])
+            val = 1 if r[1] == "ONLINE" else 0
+            labels.append(t_str)
+            data_points.append(val)
+
+        last_status = "ONLINE" if not data_points or data_points[-1] == 1 else "OFFLINE"
+    except Exception as e:
+        print(f"[WEB DASHBOARD ERROR] {e}", flush=True)
+        labels = []
+        data_points = []
+        last_status = "UNKNOWN"
+
+    # HTML-страница дашборда в профессиональном стиле (Dark Mode + Chart.js)
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="ru">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Powerbot Dashboard</title>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    </head>
+    <body class="bg-gray-950 text-gray-100 font-sans antialiased min-h-screen p-4 flex flex-col justify-between">
+        <div class="max-w-4xl mx-auto w-full">
+            <!-- Шапка -->
+            <div class="flex justify-between items-center mb-6 border-b border-gray-800 pb-4">
+                <div>
+                    <h1 class="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
+                        ⚡ Powerbot Monitor
+                    </h1>
+                    <p class="text-xs text-gray-400 mt-1">Мониторинг сети в реальном времени</p>
+                </div>
+                <div id="status-badge" class="px-3 py-1 rounded-full text-xs font-semibold {'bg-green-500/20 text-green-400 border border-green-500/30' if last_status == 'ONLINE' else 'bg-red-500/20 text-red-400 border border-red-500/30'}">
+                    {'🟢 СЕТЬ АКТИВНА' if last_status == 'ONLINE' else '🔴 СЕТЬ ОТКЛЮЧЕНА'}
+                </div>
+            </div>
+
+            <!-- Карточка графика -->
+            <div class="bg-gray-900 border border-gray-800 rounded-2xl p-5 shadow-xl mb-6">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-sm font-semibold text-gray-300 uppercase tracking-wider">История состояний сети</h2>
+                    <span class="text-xs text-gray-500">Последние события</span>
+                </div>
+                <div class="relative h-72 w-full">
+                    <canvas id="powerChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Подвал -->
+        <div class="text-center text-xs text-gray-600 py-2">
+            Powerbot Telecommunication Suite &bull; Solomianskyi District, Kyiv
+        </div>
+
+        <script>
+            // Инициализация Telegram WebApp
+            let tg = window.Telegram.WebApp;
+            tg.expand();
+
+            const labels = {str(labels).replace("'", '"')};
+            const dataPoints = {str(data_points)};
+
+            const ctx = document.getElementById('powerChart').getContext('2d');
+            const powerChart = new Chart(ctx, {{
+                type: 'line',
+                data: {{
+                    labels: labels,
+                    datasets: [{{
+                        label: 'Статус света (1 = Есть, 0 = Нет)',
+                        data: dataPoints,
+                        borderColor: '#2ecc71',
+                        backgroundColor: 'rgba(46, 204, 113, 0.1)',
+                        borderWidth: 2,
+                        stepped: true,
+                        fill: true,
+                        tension: 0.1,
+                        pointRadius: 4,
+                        pointBackgroundColor: dataPoints.map(v => v === 1 ? '#2ecc71' : '#e74c3c')
+                    }}]
+                }},
+                options: {{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {{
+                        x: {{
+                            grid: {{ color: 'rgba(255, 255, 255, 0.05)' }},
+                            ticks: {{ color: '#9ca3af', font: {{ size: 10 }} }}
+                        }},
+                        y: {{
+                            min: -0.1,
+                            max: 1.1,
+                            ticks: {{
+                                stepSize: 1,
+                                color: '#9ca3af',
+                                callback: function(value) {{
+                                    if (value === 1) return 'Есть';
+                                    if (value === 0) return 'Нет';
+                                    return '';
+                                }}
+                            }},
+                            grid: {{ color: 'rgba(255, 255, 255, 0.05)' }}
+                        }}
+                    }},
+                    plugins: {{
+                        legend: {{ display: false }},
+                        tooltip: {{
+                            callbacks: {{
+                                label: function(context) {{
+                                    return context.parsed.y === 1 ? ' Статус: Свет есть' : ' Статус: Света нет';
+                                }}
+                            }}
+                        }}
+                    }}
+                }}
+            }});
+        </script>
+    </body>
+    </html>
+    """
+    return web.Response(text=html_content, content_type='text/html')
 
 async def start_web_server():
     app = web.Application()
-    app.router.add_get("/", handle_web)
+    app.router.add_get("/", handle_root)
+    app.router.add_get("/dashboard", handle_dashboard)
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.getenv("PORT", 8080))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"[WEB] Веб-сервер запущен на порту {port}", flush=True)
+    print(f"[WEB] Веб-сервер и дашборд запущены на порту {port}", flush=True)
 
 async def main():
     print("[СТАРТ] Инициализация...", flush=True)
