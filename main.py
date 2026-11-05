@@ -55,7 +55,6 @@ def get_db_connection():
         raise ValueError("DATABASE_URL не найден в переменных окружения!")
     return psycopg2.connect(DATABASE_URL)
 
-# --- НИЖНЯЯ КЛАВАТУРА (РУССКИЙ ЯЗЫК, БЕЗ КНОПКИ ЛОГОВ) ---
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -64,7 +63,6 @@ def get_main_keyboard():
         resize_keyboard=True
     )
 
-# --- КЛАВАТУРА ВЫБОРА ЛОГОВ ---
 def get_logs_keyboard():
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -164,20 +162,16 @@ def format_duration(seconds):
     parts.append(f"{secs} сек.")
     return " ".join(parts)
 
-# --- ПИНГ С ИЗМЕРЕНИЕМ MS И TTL ---
 async def ping_target(ip):
     global last_check_time
     last_check_time = get_kyiv_time()
     
     try:
-        # Пинг с возвратом времени отклика в секундах
         delay = ping(ip, timeout=3, unit='ms')
         is_success = delay is not None and delay is not False
         
         if is_success:
             ms_val = round(delay, 1)
-            # В ping3 стандартный TTL можно запросить или вывести фиксированный системный (обычно для локальной сети/роутера TTL стабилен)
-            # Для точности выводим полученный ms и стандартный TTL (например, 64 или определяем из пакета если доступно)
             print(f"[ПИНГ] Проверка {ip} -> Успешно | Отклик: {ms_val} ms | TTL: 64", flush=True)
             return True
         else:
@@ -199,7 +193,7 @@ async def broadcast_message(text, reply_markup=None, photo_path=None):
         except Exception as e:
             print(f"[ОШИБКА] Не удалось отправить сообщение {uid}: {e}", flush=True)
 
-# --- ГЕНЕРАЦИЯ ГРАФИКА (ЗЕЛЕНЫЙ / КРАСНЫЙ / ЧЕРНЫЙ ДЛЯ НЕИЗВЕСТНОГО ПЕРИОДА) ---
+# --- ГЕНЕРАЦИЯ ГРАФИКА (ВСЕ УРОВНИ НА ОДНОЙ ВЫСОТЕ, ЧЕСТНЫЙ ЧЕРНЫЙ ДЛЯ ДНЕЙ БЕЗ ДАННЫХ) ---
 def generate_chart():
     print("[ГРАФИК] Генерация графика за последние 7 дней...", flush=True)
     try:
@@ -221,74 +215,67 @@ def generate_chart():
             day_start = datetime.datetime.combine(day, datetime.time.min)
             day_end = datetime.datetime.combine(day, datetime.time.max)
 
-            # Проверяем, были ли вообще события ДО начала этого дня
-            cursor.execute("SELECT timestamp, status FROM events WHERE timestamp < %s ORDER BY timestamp DESC LIMIT 1;", (day_start,))
-            prev_row = cursor.fetchone()
-
             day_events = [r for r in rows if r[0].date() == day]
 
-            # Если это самый первый день в базе и до него событий не было вообще -> раннее утро неизвестно (черный цвет)
-            if not prev_row and not day_events:
-                # Весь день нет данных
-                plot_times = [day_start, day_end]
-                plot_statuses = [-1, -1] # -1 обозначает неизвестность (черный)
-            else:
-                plot_times = []
-                plot_statuses = []
+            plot_times = []
+            plot_statuses = []
 
-                # Определяем начальный статус на начало дня
-                if prev_row:
-                    curr_status = 1 if prev_row[1] == "ONLINE" else 0
-                    plot_times.append(day_start)
-                    plot_statuses.append(curr_status)
-                else:
-                    # Событий до этого дня не было, но в этот день события есть. До первого события статус неизвестен (-1)
-                    if day_events:
-                        first_ev_time = day_events[0][0]
-                        if first_ev_time > day_start:
-                            plot_times.append(day_start)
-                            plot_statuses.append(-1) # Неизвестно (черный)
-                            
-                            # С какого статуса начинается день после первой записи
-                            initial_day_status = 1 if day_events[0][1] == "OFFLINE" else 0 # Если первое событие OFFLINE, то до него свет был? Или наоборот.
-                            # Проще: если первое событие ONLINE, то до него не было данных. 
-                    
-                # Заполняем события дня
+            # Если за этот день вообще нет записей в базе — весь день заливаем черным (-0.5 или специальный уровень)
+            if not day_events:
+                plot_times = [day_start, day_end]
+                plot_statuses = [0.5, 0.5] # Все состояния держим на одной высоте 0.5 для ровной полосы
+                colors = ['#2c3e50', '#2c3e50']
+                alphas = [0.5, 0.5]
+            else:
+                # Если события есть, строим по точкам
+                # Проверим, нужно ли добавить начальную точку дня
+                current_t = day_start
+                # Берем последнее состояние до начала дня, чтобы узнать, в каком статусе начался день
+                cursor.execute("SELECT status FROM events WHERE timestamp < %s ORDER BY timestamp DESC LIMIT 1;", (day_start,))
+                prev_ev = cursor.fetchone()
+                
+                last_st = (1 if prev_ev[1] == "ONLINE" else 0) if prev_ev else None
+
+                plot_times.append(day_start)
+                plot_statuses.append(last_st if last_st is not None else 0.5)
+
                 for ev in day_events:
-                    st_val = 1 if ev[1] == "ONLINE" else 0
                     plot_times.append(ev[0])
-                    plot_statuses.append(st_val)
+                    plot_statuses.append(1 if ev[1] == "ONLINE" else 0)
 
                 plot_times.append(day_end)
-                if plot_statuses:
-                    plot_statuses.append(plot_statuses[-1])
-                else:
-                    plot_statuses.append(-1)
+                plot_statuses.append(plot_statuses[-1])
 
-            # Рисуем сегменты в зависимости от статуса (-1: черный, 0: красный, 1: зеленый)
-            # Для matplotlib разобьем линии по цветам
-            for i in range(len(plot_times) - 1):
-                t_sub = [plot_times[i], plot_times[i+1]]
-                s_sub = [plot_statuses[i], plot_statuses[i+1]]
-                
-                status_val = plot_statuses[i]
-                if status_val == 1:
-                    color = '#2ecc71' # Зеленый (ЕСТЬ СВЕТ)
-                    alpha = 0.3
-                elif status_val == 0:
-                    color = '#e74c3c' # Красный (НЕТ СВЕТА)
-                    alpha = 0.4
-                else:
-                    color = '#2c3e50' # Черный / Тёмно-серый (НЕТ ДАННЫХ)
-                    alpha = 0.5
+                # Рисуем отрезки
+                for i in range(len(plot_times) - 1):
+                    t_sub = [plot_times[i], plot_times[i+1]]
+                    s_sub = [plot_statuses[i], plot_statuses[i+1]]
+                    
+                    val = plot_statuses[i]
+                    if val == 1:
+                        color = '#2ecc71' # Зеленый (Свет есть)
+                        alpha = 0.3
+                    elif val == 0:
+                        color = '#e74c3c' # Красный (Света нет)
+                        alpha = 0.4
+                    else:
+                        color = '#2c3e50' # Черный (Нет данных)
+                        alpha = 0.5
 
-                ax.step(t_sub, s_sub, where='post', color=color, linewidth=2.5)
-                ax.fill_between(t_sub, s_sub, step='post', color=color, alpha=alpha)
+                    ax.step(t_sub, s_sub, where='post', color=color, linewidth=3)
+                    ax.fill_between(t_sub, s_sub, step='post', color=color, alpha=alpha)
 
-            ax.set_yticks([0, 1])
-            ax.set_yticklabels(["Нет", "Есть"], fontsize=8)
+            if not day_events:
+                for i in range(len(plot_times) - 1):
+                    t_sub = [plot_times[i], plot_times[i+1]]
+                    s_sub = [plot_statuses[i], plot_statuses[i+1]]
+                    ax.step(t_sub, s_sub, where='post', color='#2c3e50', linewidth=3)
+                    ax.fill_between(t_sub, s_sub, step='post', color='#2c3e50', alpha=0.5)
+
+            ax.set_yticks([0, 0.5, 1])
+            ax.set_yticklabels(["Нет", "Нет данных", "Есть"], fontsize=8)
             ax.set_ylim(-0.1, 1.1)
-            ax.set_ylabel(day.strftime("%d.%m"), fontsize=9, rotation=0, labelpad=25, va='center')
+            ax.set_ylabel(day.strftime("%d.%m"), fontsize=9, rotation=0, labelpad=30, va='center')
             ax.grid(True, linestyle="--", alpha=0.5)
             ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
             ax.set_xlim(day_start, day_end)
@@ -367,7 +354,6 @@ async def process_logs_callback(callback: CallbackQuery):
     )
     await callback.answer()
 
-# --- ОСНОВНОЙ ЦИКЛ МОНИТОРИНГА ---
 async def monitor_loop():
     await asyncio.sleep(5)
     last_event = get_last_event()
