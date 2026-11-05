@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 from ping3 import ping
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import BufferedInputFile, Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import BufferedInputFile, Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiohttp import web
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
