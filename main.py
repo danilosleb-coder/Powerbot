@@ -206,7 +206,7 @@ async def broadcast_message(text, reply_markup=None, photo_path=None):
         except Exception as e:
             print(f"[ОШИБКА] Не удалось отправить сообщение {uid}: {e}", flush=True)
 
-# --- ГЕНЕРАЦИЯ ГРАФИКА ЧЕРЕЗ TAIMELINE (BROKEN_BARH) ---
+# --- ГЕНЕРАЦИЯ ГРАФИКА ЧЕРЕЗ TAIMELINE (БЕЗ ОШИБОК TIMESTAMP) ---
 def generate_chart():
     print("[ГРАФИК] Генерация таймлайна...", flush=True)
     try:
@@ -238,14 +238,16 @@ def generate_chart():
 
             day_start = datetime.datetime.combine(day, datetime.time.min)
             day_end = datetime.datetime.combine(day, datetime.time.max)
-            day_start_sec = day_start.timestamp()
-            day_end_sec = day_end.timestamp()
+            
+            # Конвертируем даты в числовой формат Matplotlib через date2num
+            day_start_num = mdates.date2num(day_start)
+            day_end_num = mdates.date2num(day_end)
 
             day_events = [r for r in rows if r[0].date() == day]
 
             if not day_events:
-                duration = day_end_sec - day_start_sec
-                ax.broken_barh([(day_start_sec, duration)], (y_pos, 8), facecolors=colors["UNKNOWN"], alpha=0.5)
+                duration = day_end_num - day_start_num
+                ax.broken_barh([(day_start_num, duration)], (y_pos, 8), facecolors=colors["UNKNOWN"], alpha=0.5)
             else:
                 past_events = [r for r in rows if r[0] < day_start]
                 last_st = "UNKNOWN"
@@ -259,24 +261,26 @@ def generate_chart():
                 for ev in day_events:
                     ev_time = ev[0]
                     if ev_time > current_time:
-                        intervals.append((current_time.timestamp(), (ev_time - current_time).total_seconds(), current_status))
+                        intervals.append((mdates.date2num(current_time), mdates.date2num(ev_time) - mdates.date2num(current_time), current_status))
                     current_time = ev_time
                     current_status = ev[1]
 
                 if current_time < day_end:
-                    intervals.append((current_time.timestamp(), (day_end - current_time).total_seconds(), current_status))
+                    intervals.append((mdates.date2num(current_time), mdates.date2num(day_end) - mdates.date2num(current_time), current_status))
 
-                for start_sec, dur_sec, status in intervals:
+                for start_num, dur_num, status in intervals:
                     color = colors.get(status, colors["UNKNOWN"])
-                    ax.broken_barh([(start_sec, dur_sec)], (y_pos, 8), facecolors=color, alpha=0.7)
+                    ax.broken_barh([(start_num, dur_num)], (y_pos, 8), facecolors=color, alpha=0.7)
 
         ax.set_yticks(y_ticks)
         ax.set_yticklabels(y_labels, fontsize=10, fontweight="bold")
         
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M', tz=ZoneInfo("Europe/Kiev")))
+        # Настраиваем ось X для отображения часов
+        ax.xaxis_major_formatter = mdates.DateFormatter('%H:%M', tz=ZoneInfo("Europe/Kiev"))
+        ax.xaxis.set_major_formatter(ax.xaxis_major_formatter)
         
-        xmin = datetime.datetime.combine(days[0], datetime.time.min).timestamp()
-        xmax = datetime.datetime.combine(days[-1], datetime.time.max).timestamp()
+        xmin = mdates.date2num(datetime.datetime.combine(days[0], datetime.time.min))
+        xmax = mdates.date2num(datetime.datetime.combine(days[-1], datetime.time.max))
         ax.set_xlim(xmin, xmax)
 
         ax.set_ylim(-2, len(days) * 10 + 2)
