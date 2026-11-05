@@ -2,3 +2,4 @@ aiogram==3.13.1
 matplotlib==3.9.2
 aiohttp==3.10.5
 ping3
+psycopg2-binary
