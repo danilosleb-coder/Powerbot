@@ -290,7 +290,7 @@ async def monitor_loop():
 
         await asyncio.sleep(CHECK_INTERVAL)
 
-# --- ВЕБ-СЕРВЕР И КРУПНЫЙ СВЕТЛЫЙ ДАШБОРД ---
+# --- ВЕБ-СЕРВЕР И ПРОПОРЦИОНАЛЬНЫЙ ТАЙМЛАЙН-ДАШБОРД ---
 async def handle_root(request):
     return web.Response(text="Power Bot Web Service is running!")
 
@@ -323,35 +323,69 @@ async def handle_dashboard(request):
     for day in days:
         day_date = day.date()
         day_start = datetime.datetime.combine(day_date, datetime.time.min, tzinfo=ZoneInfo("Europe/Kiev"))
+        day_end = datetime.datetime.combine(day_date, datetime.time.max, tzinfo=ZoneInfo("Europe/Kiev"))
         
+        # Статус на начало дня (00:00)
         past_events = [r for r in rows if (r[0].replace(tzinfo=ZoneInfo("Europe/Kiev")) if r[0].tzinfo is None else r[0]) < day_start]
+        last_st = "UNKNOWN"
+        if past_events:
+            last_st = past_events[-1][1]
         
-        if not past_events and not rows:
-            last_st = -1
-        elif not past_events:
-            last_st = -1
-        else:
-            last_st = 1 if past_events[-1][1] == "ONLINE" else 0
+        # События внутри этого дня
+        day_events = [r for r in rows if day_start <= (r[0].replace(tzinfo=ZoneInfo("Europe/Kiev")) if r[0].tzinfo is None else r[0]) <= day_end]
         
-        day_events = [r for r in rows if (r[0].replace(tzinfo=ZoneInfo("Europe/Kiev")) if r[0].tzinfo is None else r[0]).date() == day_date]
-        
-        points = [{"time": "00:00", "val": last_st}]
+        # Строим пропорциональные интервалы в минутах от 0 до 1440 (24 часа)
+        current_min = 0.0
         current_st = last_st
+        intervals = []
         
         for ev in day_events:
-            ev_time = ev[0].replace(tzinfo=ZoneInfo("Europe/Kiev")) if ev[0].tzinfo is None else ev[0]
-            t_str = ev_time.strftime("%H:%M")
-            current_st = 1 if ev[1] == "ONLINE" else 0
-            points.append({"time": t_str, "val": current_st})
+            ev_dt = ev[0].replace(tzinfo=ZoneInfo("Europe/Kiev")) if ev[0].tzinfo is None else ev[0]
+            ev_min = ev_dt.hour * 60 + ev_dt.minute + ev_dt.second / 60.0
             
-        points.append({"time": "23:59", "val": current_st})
-        
+            if ev_min > current_min:
+                intervals.append((current_min, ev_min, current_st))
+            current_min = ev_min
+            current_st = ev[1]
+            
+        if current_min < 1440.0:
+            intervals.append((current_min, 1440.0, current_st))
+            
+        # Форматируем в проценты для CSS
+        css_segments = []
+        for start_m, end_m, st in intervals:
+            duration = end_m - start_m
+            if duration <= 0:
+                continue
+            width_pct = (duration / 1440.0) * 100
+            left_pct = (start_m / 1440.0) * 100
+            
+            if st == "ONLINE":
+                bg_color = "#10b981" # Зеленый
+                status_name = "Свет есть"
+            elif st == "OFFLINE":
+                bg_color = "#ef4444" # Красный
+                status_name = "Света нет"
+            else:
+                bg_color = "#1e293b" # Черный/темно-серый (нет инфы)
+                status_name = "Нет информации"
+                
+            start_str = f"{int(start_m // 60):02d}:{int(start_m % 60):02d}"
+            end_str = f"{int(end_m // 60):02d}:{int(end_m % 60):02d}"
+            
+            css_segments.append({
+                "left": left_pct,
+                "width": width_pct,
+                "color": bg_color,
+                "tooltip": f"{start_str} - {end_str}: {status_name}"
+            })
+            
         weekday_name = ru_weekdays[day_date.weekday()]
         date_str_formatted = f"{day_date.strftime('%d.%m')} ({weekday_name})"
 
         days_data.append({
             "date_str": date_str_formatted,
-            "points": points
+            "segments": css_segments
         })
 
     days_json = json.dumps(days_data)
@@ -363,13 +397,12 @@ async def handle_dashboard(request):
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Powerbot Dashboard</title>
-        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <script src="https://cdn.tailwindcss.com"></script>
         <script src="https://telegram.org/js/telegram-web-app.js"></script>
     </head>
     <body class="bg-slate-100 text-slate-800 font-sans antialiased p-4 min-h-screen">
-        <div class="max-w-xl mx-auto space-y-4" id="charts-container">
-            <!-- Рендеринг графиков -->
+        <div class="max-w-xl mx-auto space-y-4" id="cards-container">
+            <!-- Динамические карточки дней -->
         </div>
 
         <script>
@@ -377,100 +410,35 @@ async def handle_dashboard(request):
             tg.expand();
 
             const daysData = {days_json};
-            const container = document.getElementById('charts-container');
+            const container = document.getElementById('cards-container');
 
-            daysData.forEach((day, index) => {{
+            daysData.forEach((day) => {{
                 const card = document.createElement('div');
                 card.className = 'bg-white border border-slate-200 rounded-2xl p-4 shadow-sm';
+                
+                let segmentsHtml = '';
+                day.segments.forEach(seg => {{
+                    segmentsHtml += `<div class="absolute h-full top-0 transition-all hover:opacity-90" style="left: ${{seg.left}}%; width: ${{seg.width}}%; background-color: ${{seg.color}};" title="${{seg.tooltip}}"></div>`;
+                }});
+
                 card.innerHTML = `
                     <div class="flex justify-between items-center mb-2">
                         <span class="text-sm font-bold text-slate-800">${{day.date_str}}</span>
                     </div>
-                    <div class="relative h-28 w-full">
-                        <canvas id="chart_${{index}}"></canvas>
+                    <!-- Шкала времени на 100% высоты -->
+                    <div class="relative h-10 w-full bg-slate-900 rounded-xl overflow-hidden shadow-inner flex">
+                        ${{segmentsHtml}}
+                    </div>
+                    <!-- Метки времени -->
+                    <div class="flex justify-between text-xs text-slate-500 mt-1.5 px-0.5 font-semibold">
+                        <span>00:00</span>
+                        <span>06:00</span>
+                        <span>12:00</span>
+                        <span>18:00</span>
+                        <span>23:59</span>
                     </div>
                 `;
                 container.appendChild(card);
-
-                const ctx = document.getElementById(`chart_${{index}}`).getContext('2d');
-                const labels = day.points.map(p => p.time);
-                const values = day.points.map(p => p.val);
-
-                new Chart(ctx, {{
-                    type: 'line',
-                    data: {{
-                        labels: labels,
-                        datasets: [{{
-                            data: values,
-                            borderWidth: 2.5,
-                            stepped: true,
-                            fill: true,
-                            tension: 0,
-                            pointRadius: 3,
-                            segment: {{
-                                borderColor: ctx => {{
-                                    const v1 = ctx.p1.parsed.y;
-                                    if (v1 === 1) return '#10b981'; // Зеленый
-                                    if (v1 === 0) return '#ef4444'; // Красный
-                                    return '#334155'; // Черный (нет инфы)
-                                }},
-                                backgroundColor: ctx => {{
-                                    const v1 = ctx.p1.parsed.y;
-                                    if (v1 === 1) return 'rgba(16, 185, 129, 0.15)';
-                                    if (v1 === 0) return 'rgba(239, 68, 68, 0.15)';
-                                    return 'rgba(51, 65, 85, 0.15)';
-                                }}
-                            }},
-                            pointBackgroundColor: values.map(v => {{
-                                if (v === 1) return '#10b981';
-                                if (v === 0) return '#ef4444';
-                                return '#334155';
-                            }})
-                        }}]
-                    }},
-                    options: {{
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        scales: {{
-                            x: {{
-                                grid: {{ display: false }},
-                                ticks: {{ color: '#475569', font: {{ size: 11, weight: '600' }}, maxTicksLimit: 8 }}
-                            }},
-                            y: {{
-                                min: -1.2,
-                                max: 1.2,
-                                ticks: {{
-                                    stepSize: 1,
-                                    color: '#475569',
-                                    font: {{ size: 10, weight: '600' }},
-                                    callback: function(value) {{
-                                        if (value === 1) return 'Есть';
-                                        if (value === 0) return 'Нет';
-                                        if (value === -1) return 'Нет инфы';
-                                        return '';
-                                    }}
-                                }},
-                                grid: {{ color: 'rgba(0, 0, 0, 0.05)' }}
-                            }}
-                        }},
-                        plugins: {{
-                            legend: {{ display: false }},
-                            tooltip: {{
-                                callbacks: {{
-                                    title: function(context) {{
-                                        return `${{day.date_str}} ${{context[0].label}}`;
-                                    }},
-                                    label: function(context) {{
-                                        const y = context.parsed.y;
-                                        if (y === 1) return ' Свет есть';
-                                        if (y === 0) return ' Света нет';
-                                        return ' Нет информации';
-                                    }}
-                                }}
-                            }}
-                        }}
-                    }}
-                }});
             }});
         </script>
     </body>
