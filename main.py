@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import json
 import os
 import sys
 from collections import deque
@@ -60,16 +61,12 @@ def get_db_connection():
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📊 Статус"), KeyboardButton(text="📈 Веб-Дашборд 🌐")]
+            [
+                KeyboardButton(text="📊 Статус"),
+                KeyboardButton(text="📈 Веб-Дашборд 🌐", web_app=WebAppInfo(url=WEB_APP_URL))
+            ]
         ],
         resize_keyboard=True
-    )
-
-def get_dashboard_inline_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🚀 Открыть интерактивный дашборд", web_app=WebAppInfo(url=WEB_APP_URL))]
-        ]
     )
 
 def get_logs_keyboard():
@@ -140,19 +137,6 @@ def log_event(status):
     except Exception as e:
         print(f"[ОШИБКА БД] Не удалось записать событие: {e}", flush=True)
 
-def log_event_silent(status, custom_time=None):
-    now = custom_time if custom_time else datetime.datetime.now(ZoneInfo("Europe/Kiev")).strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO events (timestamp, status) VALUES (%s, %s);", (now, status))
-        conn.commit()
-        cursor.close()
-        conn.close()
-        print(f"[ТИХИЙ БЭКЕНД] Записано в БД -> Статус: {status} | Время: {now}", flush=True)
-    except Exception as e:
-        print(f"[ОШИБКА БД] Не удалось выполнить тихую запись: {e}", flush=True)
-
 def get_last_event():
     try:
         conn = get_db_connection()
@@ -215,8 +199,7 @@ async def broadcast_message(text, reply_markup=None):
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     add_user(message.chat.id)
-    await message.answer("⚡ Привет! Бот мониторинга сети успешно подключен. Нажми кнопку ниже, чтобы открыть интерактивный дашборд:", reply_markup=get_main_keyboard())
-    await message.answer("👇 Запуск панели управления:", reply_markup=get_dashboard_inline_keyboard())
+    await message.answer("⚡ Привет! Бот мониторинга сети успешно подключен.", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "📊 Статус")
 @dp.message(Command("status"))
@@ -230,12 +213,6 @@ async def cmd_status(message: Message):
         st_text = "🟢 Свет есть" if status == "ONLINE" else "🔴 Света нет"
         text = f"Текущий статус: {st_text}\nСвет {'есть' if status == 'ONLINE' else 'отсутствует'} с: {t}\nПоследняя проверка: {last_check_time}"
     await message.answer(text, reply_markup=get_main_keyboard())
-
-@dp.message(F.text == "📈 Веб-Дашборд 🌐")
-@dp.message(Command("chart"))
-async def cmd_chart(message: Message):
-    add_user(message.chat.id)
-    await message.answer("📊 Открой интерактивный дашборд в один клик:", reply_markup=get_dashboard_inline_keyboard())
 
 @dp.message(Command("logs"))
 async def cmd_logs(message: Message):
@@ -300,8 +277,6 @@ async def monitor_loop():
 
                 text = f"🟢 Свет появился в {recovery_time_str}. Света не было {duration_str}."
                 await broadcast_message(text, reply_markup=get_main_keyboard())
-            else:
-                pass
         else:
             fails += 1
             if is_online and fails >= FAIL_THRESHOLD:
@@ -315,7 +290,7 @@ async def monitor_loop():
 
         await asyncio.sleep(CHECK_INTERVAL)
 
-# --- ВЕБ-СЕРВЕР И ИНТЕРАКТИВНЫЙ ДАШБОРД (WEB APP) ---
+# --- ВЕБ-СЕРВЕР И СВЕТЛЫЙ ДАШБОРД (7 СТРОК ПО ДНЯМ) ---
 async def handle_root(request):
     return web.Response(text="Power Bot Web Service is running!")
 
@@ -327,24 +302,45 @@ async def handle_dashboard(request):
         rows = cursor.fetchall()
         cursor.close()
         conn.close()
-
-        # Форматируем данные для графиков JS
-        labels = []
-        data_points = []
-        for r in rows:
-            t_str = r[0].strftime("%Y-%m-%d %H:%M:%S") if isinstance(r[0], datetime.datetime) else str(r[0])
-            val = 1 if r[1] == "ONLINE" else 0
-            labels.append(t_str)
-            data_points.append(val)
-
-        last_status = "ONLINE" if not data_points or data_points[-1] == 1 else "OFFLINE"
     except Exception as e:
         print(f"[WEB DASHBOARD ERROR] {e}", flush=True)
-        labels = []
-        data_points = []
-        last_status = "UNKNOWN"
+        rows = []
 
-    # HTML-страница дашборда в профессиональном стиле (Dark Mode + Chart.js)
+    now_kyiv = datetime.datetime.now(ZoneInfo("Europe/Kiev"))
+    days = [(now_kyiv - datetime.timedelta(days=6 - i)) for i in range(7)]
+    
+    days_data = []
+    for day in days:
+        day_date = day.date()
+        day_start = datetime.datetime.combine(day_date, datetime.time.min, tzinfo=ZoneInfo("Europe/Kiev"))
+        
+        # Определяем статус на начало дня
+        past_events = [r for r in rows if (r[0].replace(tzinfo=ZoneInfo("Europe/Kiev")) if r[0].tzinfo is None else r[0]) < day_start]
+        last_st = "ONLINE"
+        if past_events:
+            last_st = past_events[-1][1]
+        
+        # События текущего дня
+        day_events = [r for r in rows if (r[0].replace(tzinfo=ZoneInfo("Europe/Kiev")) if r[0].tzinfo is None else r[0]).date() == day_date]
+        
+        points = [{"time": "00:00", "val": 1 if last_st == "ONLINE" else 0}]
+        current_st = last_st
+        
+        for ev in day_events:
+            ev_time = ev[0].replace(tzinfo=ZoneInfo("Europe/Kiev")) if ev[0].tzinfo is None else ev[0]
+            t_str = ev_time.strftime("%H:%M")
+            current_st = ev[1]
+            points.append({"time": t_str, "val": 1 if current_st == "ONLINE" else 0})
+            
+        points.append({"time": "23:59", "val": 1 if current_st == "ONLINE" else 0})
+        
+        days_data.append({
+            "date_str": day_date.strftime("%d.%m"),
+            "points": points
+        })
+
+    days_json = json.dumps(days_data)
+
     html_content = f"""
     <!DOCTYPE html>
     <html lang="ru">
@@ -356,98 +352,90 @@ async def handle_dashboard(request):
         <script src="https://cdn.tailwindcss.com"></script>
         <script src="https://telegram.org/js/telegram-web-app.js"></script>
     </head>
-    <body class="bg-gray-950 text-gray-100 font-sans antialiased min-h-screen p-4 flex flex-col justify-between">
-        <div class="max-w-4xl mx-auto w-full">
-            <!-- Шапка -->
-            <div class="flex justify-between items-center mb-6 border-b border-gray-800 pb-4">
-                <div>
-                    <h1 class="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
-                        ⚡ Powerbot Monitor
-                    </h1>
-                    <p class="text-xs text-gray-400 mt-1">Мониторинг сети в реальном времени</p>
-                </div>
-                <div id="status-badge" class="px-3 py-1 rounded-full text-xs font-semibold {'bg-green-500/20 text-green-400 border border-green-500/30' if last_status == 'ONLINE' else 'bg-red-500/20 text-red-400 border border-red-500/30'}">
-                    {'🟢 СЕТЬ АКТИВНА' if last_status == 'ONLINE' else '🔴 СЕТЬ ОТКЛЮЧЕНА'}
-                </div>
-            </div>
-
-            <!-- Карточка графика -->
-            <div class="bg-gray-900 border border-gray-800 rounded-2xl p-5 shadow-xl mb-6">
-                <div class="flex justify-between items-center mb-4">
-                    <h2 class="text-sm font-semibold text-gray-300 uppercase tracking-wider">История состояний сети</h2>
-                    <span class="text-xs text-gray-500">Последние события</span>
-                </div>
-                <div class="relative h-72 w-full">
-                    <canvas id="powerChart"></canvas>
-                </div>
-            </div>
-        </div>
-
-        <!-- Подвал -->
-        <div class="text-center text-xs text-gray-600 py-2">
-            Powerbot Telecommunication Suite &bull; Solomianskyi District, Kyiv
+    <body class="bg-slate-50 text-slate-800 font-sans antialiased p-3 min-h-screen">
+        <div class="max-w-xl mx-auto space-y-2" id="charts-container">
+            <!-- Сюда динамически рендерятся 7 графиков по дням -->
         </div>
 
         <script>
-            // Инициализация Telegram WebApp
             let tg = window.Telegram.WebApp;
             tg.expand();
 
-            const labels = {str(labels).replace("'", '"')};
-            const dataPoints = {str(data_points)};
+            const daysData = {days_json};
+            const container = document.getElementById('charts-container');
 
-            const ctx = document.getElementById('powerChart').getContext('2d');
-            const powerChart = new Chart(ctx, {{
-                type: 'line',
-                data: {{
-                    labels: labels,
-                    datasets: [{{
-                        label: 'Статус света (1 = Есть, 0 = Нет)',
-                        data: dataPoints,
-                        borderColor: '#2ecc71',
-                        backgroundColor: 'rgba(46, 204, 113, 0.1)',
-                        borderWidth: 2,
-                        stepped: true,
-                        fill: true,
-                        tension: 0.1,
-                        pointRadius: 4,
-                        pointBackgroundColor: dataPoints.map(v => v === 1 ? '#2ecc71' : '#e74c3c')
-                    }}]
-                }},
-                options: {{
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: {{
-                        x: {{
-                            grid: {{ color: 'rgba(255, 255, 255, 0.05)' }},
-                            ticks: {{ color: '#9ca3af', font: {{ size: 10 }} }}
-                        }},
-                        y: {{
-                            min: -0.1,
-                            max: 1.1,
-                            ticks: {{
-                                stepSize: 1,
-                                color: '#9ca3af',
-                                callback: function(value) {{
-                                    if (value === 1) return 'Есть';
-                                    if (value === 0) return 'Нет';
-                                    return '';
-                                }}
-                            }},
-                            grid: {{ color: 'rgba(255, 255, 255, 0.05)' }}
-                        }}
+            daysData.forEach((day, index) => {{
+                const card = document.createElement('div');
+                card.className = 'bg-white border border-slate-200/80 rounded-xl p-2.5 shadow-sm';
+                card.innerHTML = `
+                    <div class="flex justify-between items-center mb-1">
+                        <span class="text-xs font-bold text-slate-600">${{day.date_str}}</span>
+                    </div>
+                    <div class="relative h-14 w-full">
+                        <canvas id="chart_${{index}}"></canvas>
+                    </div>
+                `;
+                container.appendChild(card);
+
+                const ctx = document.getElementById(`chart_${{index}}`).getContext('2d');
+                const labels = day.points.map(p => p.time);
+                const values = day.points.map(p => p.val);
+
+                new Chart(ctx, {{
+                    type: 'line',
+                    data: {{
+                        labels: labels,
+                        datasets: [{{
+                            data: values,
+                            borderColor: '#10b981',
+                            backgroundColor: 'rgba(16, 185, 129, 0.12)',
+                            borderWidth: 2,
+                            stepped: true,
+                            fill: true,
+                            tension: 0,
+                            pointRadius: 2,
+                            pointBackgroundColor: values.map(v => v === 1 ? '#10b981' : '#ef4444')
+                        }}]
                     }},
-                    plugins: {{
-                        legend: {{ display: false }},
-                        tooltip: {{
-                            callbacks: {{
-                                label: function(context) {{
-                                    return context.parsed.y === 1 ? ' Статус: Свет есть' : ' Статус: Света нет';
+                    options: {{
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {{
+                            x: {{
+                                grid: {{ display: false }},
+                                ticks: {{ color: '#64748b', font: {{ size: 9 }}, maxTicksLimit: 8 }}
+                            }},
+                            y: {{
+                                min: -0.1,
+                                max: 1.1,
+                                ticks: {{
+                                    stepSize: 1,
+                                    color: '#64748b',
+                                    font: {{ size: 9 }},
+                                    callback: function(value) {{
+                                        if (value === 1) return 'Есть';
+                                        if (value === 0) return 'Нет';
+                                        return '';
+                                    }}
+                                }},
+                                grid: {{ color: 'rgba(0, 0, 0, 0.04)' }}
+                            }}
+                        }},
+                        plugins: {{
+                            legend: {{ display: false }},
+                            tooltip: {{
+                                callbacks: {{
+                                    title: function(context) {{
+                                        return `${{day.date_str}} ${{context[0].label}}`;
+                                    }},
+                                    label: function(context) {{
+                                        return context.parsed.y === 1 ? ' Свет есть' : ' Света нет';
+                                    }}
                                 }}
                             }}
                         }}
                     }}
-                }}
+                }});
             }});
         </script>
     </body>
