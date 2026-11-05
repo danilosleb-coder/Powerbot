@@ -290,7 +290,7 @@ async def monitor_loop():
 
         await asyncio.sleep(CHECK_INTERVAL)
 
-# --- ВЕБ-СЕРВЕР И ДАШБОРД С РУССКИМИ ДНЯМИ НЕДЕЛИ И СТАТУСАМИ ---
+# --- ВЕБ-СЕРВЕР И КРУПНЫЙ СВЕТЛЫЙ ДАШБОРД ---
 async def handle_root(request):
     return web.Response(text="Power Bot Web Service is running!")
 
@@ -324,17 +324,15 @@ async def handle_dashboard(request):
         day_date = day.date()
         day_start = datetime.datetime.combine(day_date, datetime.time.min, tzinfo=ZoneInfo("Europe/Kiev"))
         
-        # Проверяем, были ли вообще события до этого дня
         past_events = [r for r in rows if (r[0].replace(tzinfo=ZoneInfo("Europe/Kiev")) if r[0].tzinfo is None else r[0]) < day_start]
         
         if not past_events and not rows:
-            last_st = -1  # Нет инфы вообще (черный)
+            last_st = -1
         elif not past_events:
-            last_st = -1  # До первого события в БД нет инфы
+            last_st = -1
         else:
             last_st = 1 if past_events[-1][1] == "ONLINE" else 0
         
-        # События текущего дня
         day_events = [r for r in rows if (r[0].replace(tzinfo=ZoneInfo("Europe/Kiev")) if r[0].tzinfo is None else r[0]).date() == day_date]
         
         points = [{"time": "00:00", "val": last_st}]
@@ -369,8 +367,8 @@ async def handle_dashboard(request):
         <script src="https://cdn.tailwindcss.com"></script>
         <script src="https://telegram.org/js/telegram-web-app.js"></script>
     </head>
-    <body class="bg-slate-50 text-slate-800 font-sans antialiased p-3 min-h-screen">
-        <div class="max-w-xl mx-auto space-y-3" id="charts-container">
+    <body class="bg-slate-100 text-slate-800 font-sans antialiased p-4 min-h-screen">
+        <div class="max-w-xl mx-auto space-y-4" id="charts-container">
             <!-- Рендеринг графиков -->
         </div>
 
@@ -383,12 +381,12 @@ async def handle_dashboard(request):
 
             daysData.forEach((day, index) => {{
                 const card = document.createElement('div');
-                card.className = 'bg-white border border-slate-200/80 rounded-xl p-2.5 shadow-sm';
+                card.className = 'bg-white border border-slate-200 rounded-2xl p-4 shadow-sm';
                 card.innerHTML = `
-                    <div class="flex justify-between items-center mb-1">
-                        <span class="text-xs font-bold text-slate-700">${{day.date_str}}</span>
+                    <div class="flex justify-between items-center mb-2">
+                        <span class="text-sm font-bold text-slate-800">${{day.date_str}}</span>
                     </div>
-                    <div class="relative h-14 w-full">
+                    <div class="relative h-28 w-full">
                         <canvas id="chart_${{index}}"></canvas>
                     </div>
                 `;
@@ -404,33 +402,29 @@ async def handle_dashboard(request):
                         labels: labels,
                         datasets: [{{
                             data: values,
-                            borderWidth: 2,
+                            borderWidth: 2.5,
                             stepped: true,
                             fill: true,
                             tension: 0,
-                            pointRadius: 2,
+                            pointRadius: 3,
                             segment: {{
                                 borderColor: ctx => {{
-                                    const v0 = ctx.p0.parsed.y;
                                     const v1 = ctx.p1.parsed.y;
-                                    if (v0 === 1 && v1 === 1) return '#10b981'; // Зеленый
-                                    if (v0 === 0 && v1 === 0) return '#ef4444'; // Красный
-                                    if (v0 === -1 && v1 === -1) return '#0f172a'; // Черный (нет инфы)
-                                    return '#64748b';
+                                    if (v1 === 1) return '#10b981'; // Зеленый
+                                    if (v1 === 0) return '#ef4444'; // Красный
+                                    return '#334155'; // Черный (нет инфы)
                                 }},
                                 backgroundColor: ctx => {{
-                                    const v0 = ctx.p0.parsed.y;
                                     const v1 = ctx.p1.parsed.y;
-                                    if (v0 === 1 && v1 === 1) return 'rgba(16, 185, 129, 0.15)';
-                                    if (v0 === 0 && v1 === 0) return 'rgba(239, 68, 68, 0.15)';
-                                    if (v0 === -1 && v1 === -1) return 'rgba(15, 23, 42, 0.15)';
-                                    return 'rgba(100, 116, 139, 0.15)';
+                                    if (v1 === 1) return 'rgba(16, 185, 129, 0.15)';
+                                    if (v1 === 0) return 'rgba(239, 68, 68, 0.15)';
+                                    return 'rgba(51, 65, 85, 0.15)';
                                 }}
                             }},
                             pointBackgroundColor: values.map(v => {{
                                 if (v === 1) return '#10b981';
                                 if (v === 0) return '#ef4444';
-                                return '#0f172a';
+                                return '#334155';
                             }})
                         }}]
                     }},
@@ -440,15 +434,15 @@ async def handle_dashboard(request):
                         scales: {{
                             x: {{
                                 grid: {{ display: false }},
-                                ticks: {{ color: '#64748b', font: {{ size: 9 }}, maxTicksLimit: 8 }}
+                                ticks: {{ color: '#475569', font: {{ size: 11, weight: '600' }}, maxTicksLimit: 8 }}
                             }},
                             y: {{
                                 min: -1.2,
                                 max: 1.2,
                                 ticks: {{
                                     stepSize: 1,
-                                    color: '#64748b',
-                                    font: {{ size: 8 }},
+                                    color: '#475569',
+                                    font: {{ size: 10, weight: '600' }},
                                     callback: function(value) {{
                                         if (value === 1) return 'Есть';
                                         if (value === 0) return 'Нет';
@@ -456,7 +450,7 @@ async def handle_dashboard(request):
                                         return '';
                                     }}
                                 }},
-                                grid: {{ color: 'rgba(0, 0, 0, 0.04)' }}
+                                grid: {{ color: 'rgba(0, 0, 0, 0.05)' }}
                             }}
                         }},
                         plugins: {{
