@@ -310,7 +310,7 @@ async def monitor_loop():
 
         await asyncio.sleep(CHECK_INTERVAL)
 
-# --- ВЕБ-СЕРВЕР И ДАШБОРД С АККОРДЕОНОМ И КЛИКОМ ПО ШКАЛЕ ---
+# --- ВЕБ-СЕРВЕР И ДАШБОРД ---
 async def handle_root(request):
     return web.Response(text="Power Bot Web Service is running!")
 
@@ -503,7 +503,6 @@ async def handle_dashboard(request):
     for i, curr in enumerate(raw_days_stats):
         prev = raw_days_stats[i - 1] if i > 0 else None
 
-        # 1. Света не было: больше -> красный (↑), меньше -> зеленый (↓)
         offline_symbol = '<span class="text-slate-400 font-bold ml-1">—</span>'
         if curr["has_data"] and prev and prev["has_data"] and curr["offline_mins"] is not None and prev["offline_mins"] is not None:
             if curr["offline_mins"] > prev["offline_mins"]:
@@ -511,7 +510,6 @@ async def handle_dashboard(request):
             elif curr["offline_mins"] < prev["offline_mins"]:
                 offline_symbol = '<span class="text-emerald-500 font-extrabold ml-1">↓</span>'
 
-        # 2. Свет был: больше -> зеленый (↑), меньше -> красный (↓)
         online_symbol = '<span class="text-slate-400 font-bold ml-1">—</span>'
         if curr["has_data"] and prev and prev["has_data"] and curr["online_mins"] is not None and prev["online_mins"] is not None:
             if curr["online_mins"] > prev["online_mins"]:
@@ -519,7 +517,6 @@ async def handle_dashboard(request):
             elif curr["online_mins"] < prev["online_mins"]:
                 online_symbol = '<span class="text-red-500 font-extrabold ml-1">↓</span>'
 
-        # 3. Пинг: выше -> красный (↑), ниже -> зеленый (↓)
         ping_symbol = '<span class="text-slate-400 font-bold ml-1">—</span>'
         if curr["has_data"] and prev and prev["has_data"] and curr["avg_ping"] is not None and prev["avg_ping"] is not None:
             if curr["avg_ping"] > prev["avg_ping"]:
@@ -541,7 +538,8 @@ async def handle_dashboard(request):
 
     days_json = json.dumps(days_data)
 
-    html_content = f"""
+    # Обычный не-f-строчный шаблон HTML. Все JS скобки остаются чистыми!
+    html_template = """
     <!DOCTYPE html>
     <html lang="ru">
     <head>
@@ -560,42 +558,42 @@ async def handle_dashboard(request):
             let tg = window.Telegram.WebApp;
             tg.expand();
 
-            const daysData = {days_json};
+            const daysData = /*DAYS_JSON_PLACEHOLDER*/;
             const container = document.getElementById('cards-container');
 
-            daysData.forEach((day, index) => {{
+            daysData.forEach((day, index) => {
                 const card = document.createElement('div');
                 card.className = 'bg-white border border-slate-200 rounded-2xl p-4 shadow-sm';
                 
                 let segmentsHtml = '';
-                day.segments.forEach(seg => {{
-                    segmentsHtml += `<div class="absolute h-full top-0 transition-opacity active:opacity-75 cursor-pointer" style="left: ${{seg.left}}%; width: ${{seg.width}}%; background-color: ${{seg.color}};" onclick="showToast(event, '${{seg.text}}')"></div>`;
-                }});
+                day.segments.forEach(seg => {
+                    segmentsHtml += `<div class="absolute h-full top-0 transition-opacity active:opacity-75 cursor-pointer" style="left: ${seg.left}%; width: ${seg.width}%; background-color: ${seg.color};" onclick="showToast(event, ${index}, '${seg.text}')"></div>`;
+                });
 
                 let detailsHtml = '';
-                if (day.details.length > 0) {{
-                    day.details.forEach(det => {{
+                if (day.details.length > 0) {
+                    day.details.forEach(det => {
                         detailsHtml += `
-                            <div class="flex justify-between items-center text-xs py-1 border-b border-slate-100 last:border-0">
-                                <span class="font-medium ${{det.color_class}}">${{det.text}}</span>
-                                <span class="text-slate-500 font-semibold">${{det.dur}}</span>
+                            <div class="flex justify-between items-center text-xs py-1.5 border-b border-slate-100 last:border-0">
+                                <span class="font-medium text-slate-700">${det.text}</span>
+                                <span class="font-bold ${det.color_class}">${det.dur}</span>
                             </div>
                         `;
-                    }});
-                }} else {{
-                    detailsHtml = '<div class="text-xs text-slate-400 text-center py-1">Нет подробных данных</div>';
-                }}
+                    });
+                } else {
+                    detailsHtml = '<div class="text-xs text-slate-400 text-center py-2">Нет подробных данных</div>';
+                }
 
                 card.innerHTML = `
-                    <div class="flex justify-between items-center mb-2 cursor-pointer select-none" onclick="toggleAccordion(${{index}})">
-                        <span class="text-sm font-bold text-slate-800">${{day.date_str}}</span>
-                        <svg id="arrow_${{index}}" class="w-4 h-4 text-slate-400 transition-transform duration-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <div class="flex justify-between items-center mb-2 cursor-pointer select-none" onclick="toggleAccordion(${index})">
+                        <span class="text-sm font-bold text-slate-800">${day.date_str}</span>
+                        <svg id="arrow_${index}" class="w-4 h-4 text-slate-400 transition-transform duration-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
                         </svg>
                     </div>
                     <!-- Шкала времени -->
                     <div class="relative h-10 w-full bg-white border border-slate-200 rounded-xl overflow-hidden shadow-inner flex">
-                        ${{segmentsHtml}}
+                        ${segmentsHtml}
                     </div>
                     <!-- Метки времени -->
                     <div class="flex justify-between text-xs text-slate-500 mt-1.5 px-0.5 font-semibold">
@@ -606,67 +604,63 @@ async def handle_dashboard(request):
                         <span>23:59</span>
                     </div>
                     <!-- Интерактивная всплывающая плашка по клику на шкалу -->
-                    <div id="toast_${{index}}" class="hidden mt-2 p-2 bg-slate-800 text-white text-xs rounded-lg text-center font-medium animate-pulse"></div>
+                    <div id="toast_${index}" class="hidden mt-2 p-2 bg-slate-800 text-white text-xs rounded-lg text-center font-medium"></div>
 
-                    <!-- Выпадающий аккордеон с деталями -->
-                    <div id="accordion_${{index}}" class="hidden mt-3 pt-2 border-t border-slate-100 space-y-1">
-                        ${{detailsHtml}}
+                    <!-- Выпадающий аккордеон с плавной анимацией высоты -->
+                    <div id="accordion_${index}" style="max-height: 0px;" class="overflow-hidden transition-all duration-300 ease-in-out">
+                        <div class="mt-3 pt-2 border-t border-slate-100 space-y-1">
+                            ${detailsHtml}
+                        </div>
                     </div>
 
                     <!-- Статистика -->
                     <div class="mt-3 pt-3 border-t border-slate-100 grid grid-cols-3 gap-2 text-center">
                         <div class="bg-slate-50 p-2 rounded-xl">
                             <span class="text-[10px] text-slate-400 block font-medium">Света не было</span>
-                            <span class="text-xs font-bold text-slate-700 mt-0.5 inline-flex items-center justify-center">${{day.offline_str}}${{day.offline_symbol}}</span>
+                            <span class="text-xs font-bold text-slate-700 mt-0.5 inline-flex items-center justify-center">${day.offline_str}${day.offline_symbol}</span>
                         </div>
                         <div class="bg-slate-50 p-2 rounded-xl">
                             <span class="text-[10px] text-slate-400 block font-medium">Свет был</span>
-                            <span class="text-xs font-bold text-slate-700 mt-0.5 inline-flex items-center justify-center">${{day.online_str}}${{day.online_symbol}}</span>
+                            <span class="text-xs font-bold text-slate-700 mt-0.5 inline-flex items-center justify-center">${day.online_str}${day.online_symbol}</span>
                         </div>
                         <div class="bg-slate-50 p-2 rounded-xl">
                             <span class="text-[10px] text-slate-400 block font-medium">Средний отклик</span>
-                            <span class="text-xs font-bold text-slate-700 mt-0.5 inline-flex items-center justify-center">${{day.ping_str}}${{day.ping_symbol}}</span>
+                            <span class="text-xs font-bold text-slate-700 mt-0.5 inline-flex items-center justify-center">${day.ping_str}${day.ping_symbol}</span>
                         </div>
                     </div>
                 `;
                 container.appendChild(card);
-            }});
+            });
 
-            function toggleAccordion(index) {{
-                const acc = document.getElementById(`accordion_${{index}}`);
-                const arrow = document.getElementById(`arrow_${{index}}`);
-                if (acc.classList.contains('hidden')) {{
-                    acc.classList.remove('hidden');
-                    arrow.classList.add('rotate-180');
-                }} else {{
-                    acc.classList.add('hidden');
+            function toggleAccordion(index) {
+                const acc = document.getElementById(`accordion_${index}`);
+                const arrow = document.getElementById(`arrow_${index}`);
+                if (acc.style.maxHeight && acc.style.maxHeight !== '0px') {
+                    acc.style.maxHeight = '0px';
                     arrow.classList.remove('rotate-180');
-                }}
-            }}
+                } else {
+                    acc.style.maxHeight = acc.scrollHeight + 'px';
+                    arrow.classList.add('rotate-180');
+                }
+            }
 
-            function showToast(event, text) {{
+            function showToast(event, index, text) {
                 event.stopPropagation();
-                const card = event.target.closest('.bg-white');
-                const toasts = document.querySelectorAll('[id^="toast_"]');
-                toasts.forEach(t => t.classList.add('hidden'));
-
-                const toast = card.querySelector('[id^="toast_"]');
+                document.querySelectorAll('[id^="toast_"]').forEach(t => t.classList.add('hidden'));
+                const toast = document.getElementById(`toast_${index}`);
                 toast.innerText = text;
                 toast.classList.remove('hidden');
 
-                setTimeout(() => {{
+                setTimeout(() => {
                     toast.classList.add('hidden');
-                }}, 4000);
-            }}
-
-            setTimeout(() => {{
-                location.reload();
-            }}, 30000);
-
+                }, 4000);
+            }
         </script>
     </body>
     </html>
     """
+    
+    html_content = html_template.replace("/*DAYS_JSON_PLACEHOLDER*/", days_json)
     return web.Response(text=html_content, content_type='text/html')
 
 async def start_web_server():
