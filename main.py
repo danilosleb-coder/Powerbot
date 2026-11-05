@@ -206,9 +206,9 @@ async def broadcast_message(text, reply_markup=None, photo_path=None):
         except Exception as e:
             print(f"[ОШИБКА] Не удалось отправить сообщение {uid}: {e}", flush=True)
 
-# --- ГЕНЕРАЦИЯ ГРАФИКА ЧЕРЕЗ TAIMELINE (БЕЗ ОШИБОК TIMESTAMP) ---
+# --- ГЕНЕРАЦИЯ ГРАФИКА (СУПЕР-ЧИТАЕМЫЙ ВИД: 7 СТРОК, КАЖДАЯ ОТ 00:00 ДО 23:59) ---
 def generate_chart():
-    print("[ГРАФИК] Генерация таймлайна...", flush=True)
+    print("[ГРАФИК] Генерация чистого таймлайна по дням...", flush=True)
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -218,42 +218,38 @@ def generate_chart():
         conn.close()
 
         now_kyiv = datetime.datetime.now(ZoneInfo("Europe/Kiev"))
+        # 7 дней: от 6 дней назад до сегодня
         days = [(now_kyiv - datetime.timedelta(days=6 - i)).date() for i in range(7)]
         
-        fig, ax = plt.subplots(figsize=(10, 6))
+        fig, axes = plt.subplots(7, 1, figsize=(12, 10), sharex=True)
 
         colors = {
-            "ONLINE": "#2ecc71",   # Зеленый
-            "OFFLINE": "#e74c3c",  # Красный
+            "ONLINE": "#2ecc71",   # Зеленый (Есть свет)
+            "OFFLINE": "#e74c3c",  # Красный (Нет света)
             "UNKNOWN": "#2c3e50"   # Серый (Нет данных)
         }
 
-        y_labels = []
-        y_ticks = []
-
         for idx, day in enumerate(days):
-            y_pos = idx * 10
-            y_ticks.append(y_pos + 5)
-            y_labels.append(day.strftime("%d.%m"))
-
+            ax = axes[idx]
             day_start = datetime.datetime.combine(day, datetime.time.min)
             day_end = datetime.datetime.combine(day, datetime.time.max)
-            
-            # Конвертируем даты в числовой формат Matplotlib через date2num
-            day_start_num = mdates.date2num(day_start)
-            day_end_num = mdates.date2num(day_end)
+
+            ax.set_xlim(day_start, day_end)
+            ax.set_ylim(0, 1)
 
             day_events = [r for r in rows if r[0].date() == day]
 
             if not day_events:
-                duration = day_end_num - day_start_num
-                ax.broken_barh([(day_start_num, duration)], (y_pos, 8), facecolors=colors["UNKNOWN"], alpha=0.5)
+                # Если за день вообще нет записей — заливаем весь день серым (Нет данных)
+                ax.axvspan(day_start, day_end, color=colors["UNKNOWN"], alpha=0.3)
             else:
+                # Определяем статус на начало дня (берем последнее событие до начала этого дня)
                 past_events = [r for r in rows if r[0] < day_start]
                 last_st = "UNKNOWN"
                 if past_events:
                     last_st = past_events[-1][1]
 
+                # Собираем интервалы
                 intervals = []
                 current_time = day_start
                 current_status = last_st
@@ -261,38 +257,36 @@ def generate_chart():
                 for ev in day_events:
                     ev_time = ev[0]
                     if ev_time > current_time:
-                        intervals.append((mdates.date2num(current_time), mdates.date2num(ev_time) - mdates.date2num(current_time), current_status))
+                        intervals.append((current_time, ev_time, current_status))
                     current_time = ev_time
                     current_status = ev[1]
 
                 if current_time < day_end:
-                    intervals.append((mdates.date2num(current_time), mdates.date2num(day_end) - mdates.date2num(current_time), current_status))
+                    intervals.append((current_time, day_end, current_status))
 
-                for start_num, dur_num, status in intervals:
+                # Рисуем каждый интервал на шкале этого дня
+                for start_t, end_t, status in intervals:
                     color = colors.get(status, colors["UNKNOWN"])
-                    ax.broken_barh([(start_num, dur_num)], (y_pos, 8), facecolors=color, alpha=0.7)
+                    ax.axvspan(start_t, end_t, color=color, alpha=0.6)
 
-        ax.set_yticks(y_ticks)
-        ax.set_yticklabels(y_labels, fontsize=10, fontweight="bold")
-        
-        # Настраиваем ось X для отображения часов
-        ax.xaxis_major_formatter = mdates.DateFormatter('%H:%M', tz=ZoneInfo("Europe/Kiev"))
-        ax.xaxis.set_major_formatter(ax.xaxis_major_formatter)
-        
-        xmin = mdates.date2num(datetime.datetime.combine(days[0], datetime.time.min))
-        xmax = mdates.date2num(datetime.datetime.combine(days[-1], datetime.time.max))
-        ax.set_xlim(xmin, xmax)
+            # Настройка оси Y для каждого дня
+            ax.set_yticks([0.5])
+            ax.set_yticklabels([day.strftime("%d.%m")], fontsize=10, fontweight="bold")
+            ax.grid(True, linestyle="--", alpha=0.4, axis='x')
+            ax.tick_params(left=False, labelleft=True)
 
-        ax.set_ylim(-2, len(days) * 10 + 2)
-        ax.grid(True, linestyle="--", alpha=0.5, axis='x')
-        plt.title("График наличия света за последние 7 дней", fontsize=14, fontweight="bold", pad=15)
-        
+        # Форматирование общей оси X внизу (часы от 00:00 до 23:59)
+        axes[-1].xaxis.set_major_formatter(mdates.DateFormatter('%H:%M', tz=ZoneInfo("Europe/Kiev")))
+        axes[-1].xaxis.set_major_locator(mdates.HourLocator(interval=3))
+
+        plt.suptitle("График наличия света за последние 7 дней", fontsize=14, fontweight="bold", y=0.95)
         plt.tight_layout()
+        
         chart_path = "power_chart_7days.png"
         plt.savefig(chart_path, dpi=150)
         plt.close()
         
-        print("[ГРАФИК] Таймлайн успешно сохранен.", flush=True)
+        print("[ГРАФИК] График успешно сгенерирован в классическом формате.", flush=True)
         return chart_path
     except Exception as e:
         print(f"[ОШИБКА ГРАФИКА] {e}", flush=True)
