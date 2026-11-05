@@ -193,7 +193,7 @@ async def broadcast_message(text, reply_markup=None, photo_path=None):
         except Exception as e:
             print(f"[ОШИБКА] Не удалось отправить сообщение {uid}: {e}", flush=True)
 
-# --- ГЕНЕРАЦИЯ ГРАФИКА (ИСПРАВЛЕННЫЙ ЗАПРОС И ТЕХ. СОСТОЯНИЯ) ---
+# --- ГЕНЕРАЦИЯ ГРАФИКА (ЖЕЛЕЗОБЕТОННАЯ ЗАЛИВКА ПУСТЫХ ДНЕЙ) ---
 def generate_chart():
     print("[ГРАФИК] Генерация графика за последние 7 дней...", flush=True)
     try:
@@ -204,7 +204,6 @@ def generate_chart():
         start_date = (now_kyiv - datetime.timedelta(days=6)).date()
         start_dt = datetime.datetime.combine(start_date, datetime.time.min)
         
-        # Загружаем все события за последние 7 дней
         cursor.execute("SELECT timestamp, status FROM events WHERE timestamp >= %s ORDER BY timestamp ASC;", (start_dt,))
         rows = cursor.fetchall()
 
@@ -218,13 +217,11 @@ def generate_chart():
 
             day_events = [r for r in rows if r[0].date() == day]
 
-            # ЕВАНГЕЛИЕ ПУСТЫХ ДНЕЙ: если за день вообще нет записей в БД — рисуем сплошную черную линию (0.5)
+            # Если за этот день вообще нет записей в БД — заливаем весь день черным цветом через axvspan
             if not day_events:
-                plot_times = [day_start, day_end]
-                plot_statuses = [0.5, 0.5]
-                
-                ax.step(plot_times, plot_statuses, where='post', color='#2c3e50', linewidth=3)
-                ax.fill_between(plot_times, plot_statuses, step='post', color='#2c3e50', alpha=0.5)
+                ax.axhspan(-0.1, 1.1, color='#2c3e50', alpha=0.4)
+                # И нарисуем прямую линию посередине для красоты
+                ax.plot([day_start, day_end], [0.5, 0.5], color='#2c3e50', linewidth=3)
             else:
                 plot_times = []
                 plot_statuses = []
@@ -256,7 +253,7 @@ def generate_chart():
                         color = '#e74c3c' # Красный
                         alpha = 0.4
                     else:
-                        color = '#2c3e50' # Черный (Нет данных)
+                        color = '#2c3e50' # Черный
                         alpha = 0.5
 
                     ax.step(t_sub, s_sub, where='post', color=color, linewidth=3)
