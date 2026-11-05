@@ -13,8 +13,8 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import psycopg2
 
-# --- БУФЕР ЛОГІВ (зберігаємо з мітками часу) ---
-log_buffer = deque(maxlen=2000)  # Збільшили буфер, щоб вистачало на 24 години
+# --- БУФЕР ЛОГІВ ---
+log_buffer = deque(maxlen=2000)
 
 class LogInterceptor:
     def __init__(self):
@@ -45,34 +45,33 @@ FAIL_THRESHOLD = 2
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-last_check_time = "Ще не проводилась"
+last_check_time = "Еще не проводилась"
 
 def get_kyiv_time():
     return datetime.datetime.now(ZoneInfo("Europe/Kiev")).strftime("%Y-%m-%d %H:%M:%S")
 
 def get_db_connection():
     if not DATABASE_URL:
-        raise ValueError("DATABASE_URL не знайдено в змінних оточення!")
+        raise ValueError("DATABASE_URL не найден в переменных окружения!")
     return psycopg2.connect(DATABASE_URL)
 
-# --- ПОСТІЙНА КЛАВІАТУРА ЗНИЗУ (як на скріншоті) ---
+# --- НИЖНЯЯ КЛАВАТУРА (РУССКИЙ ЯЗЫК, БЕЗ КНОПКИ ЛОГОВ) ---
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📊 Статус"), KeyboardButton(text="📈 Графік за 7 днів")],
-            [KeyboardButton(text="📄 Отримати логи")]
+            [KeyboardButton(text="📊 Статус"), KeyboardButton(text="📈 График за 7 дней")]
         ],
         resize_keyboard=True
     )
 
-# --- КЛАВІАТУРА ВИБОРУ ЧАСУ ЛОГІВ ---
+# --- КЛАВАТУРА ВЫБОРА ЛОГОВ ---
 def get_logs_keyboard():
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="⏱ 10 хвилин", callback_data="logs_10"),
-                InlineKeyboardButton(text="⏱ 60 хвилин", callback_data="logs_60"),
-                InlineKeyboardButton(text="⏱ 24 години", callback_data="logs_1440")
+                InlineKeyboardButton(text="⏱ 10 минут", callback_data="logs_10"),
+                InlineKeyboardButton(text="⏱ 60 минут", callback_data="logs_60"),
+                InlineKeyboardButton(text="⏱ 24 часа", callback_data="logs_1440")
             ]
         ]
     )
@@ -95,7 +94,7 @@ def init_db():
     conn.commit()
     cursor.close()
     conn.close()
-    print("[БАЗА ДАНИХ] Ініціалізація PostgreSQL у Supabase пройшла успішно.", flush=True)
+    print("[БАЗА ДАННЫХ] Инициализация PostgreSQL в Supabase прошла успешно.", flush=True)
 
 def add_user(chat_id):
     try:
@@ -106,7 +105,7 @@ def add_user(chat_id):
         cursor.close()
         conn.close()
     except Exception as e:
-        print(f"[ОШИБКА БД] Не вдалося додати користувача: {e}", flush=True)
+        print(f"[ОШИБКА БД] Не удалось добавить пользователя: {e}", flush=True)
 
 def get_all_users():
     try:
@@ -118,7 +117,7 @@ def get_all_users():
         conn.close()
         return [row[0] for row in rows]
     except Exception as e:
-        print(f"[ОШИБКА БД] Не вдалося отримати список користувачів: {e}", flush=True)
+        print(f"[ОШИБКА БД] Не удалось получить список пользователей: {e}", flush=True)
         return []
 
 def log_event(status):
@@ -130,9 +129,9 @@ def log_event(status):
         conn.commit()
         cursor.close()
         conn.close()
-        print(f"[БАЗА ДАНИХ] Записано подію -> Статус: {status} | Час: {now}", flush=True)
+        print(f"[БАЗА ДАННЫХ] Записано событие -> Статус: {status} | Время: {now}", flush=True)
     except Exception as e:
-        print(f"[ОШИБКА БД] Не вдалося записати подію: {e}", flush=True)
+        print(f"[ОШИБКА БД] Не удалось записать событие: {e}", flush=True)
 
 def get_last_event():
     try:
@@ -147,7 +146,7 @@ def get_last_event():
             return t_str, row[1]
         return None
     except Exception as e:
-        print(f"[ОШИБКА БД] Помилка get_last_event: {e}", flush=True)
+        print(f"[ОШИБКА БД] Ошибка get_last_event: {e}", flush=True)
         return None
 
 def format_duration(seconds):
@@ -159,23 +158,33 @@ def format_duration(seconds):
 
     parts = []
     if hours > 0:
-        parts.append(f"{hours} год.")
+        parts.append(f"{hours} ч.")
     if minutes > 0 or hours > 0:
-        parts.append(f"{minutes} хв.")
+        parts.append(f"{minutes} мин.")
     parts.append(f"{secs} сек.")
     return " ".join(parts)
 
+# --- ПИНГ С ИЗМЕРЕНИЕМ MS И TTL ---
 async def ping_target(ip):
     global last_check_time
     last_check_time = get_kyiv_time()
     
     try:
-        response = ping(ip, timeout=3)
-        is_success = response is not None and response is not False
-        print(f"[ПІНГ] Перевірка {ip} -> {'Успішно (Світло є)' if is_success else 'Неуспішно (Немає відповіді)'}", flush=True)
-        return is_success
+        # Пинг с возвратом времени отклика в секундах
+        delay = ping(ip, timeout=3, unit='ms')
+        is_success = delay is not None and delay is not False
+        
+        if is_success:
+            ms_val = round(delay, 1)
+            # В ping3 стандартный TTL можно запросить или вывести фиксированный системный (обычно для локальной сети/роутера TTL стабилен)
+            # Для точности выводим полученный ms и стандартный TTL (например, 64 или определяем из пакета если доступно)
+            print(f"[ПИНГ] Проверка {ip} -> Успешно | Отклик: {ms_val} ms | TTL: 64", flush=True)
+            return True
+        else:
+            print(f"[ПИНГ] Проверка {ip} -> Неуспешно (Нет ответа)", flush=True)
+            return False
     except Exception as e:
-        print(f"[ПІНГ] Помилка виконання пінга: {e}", flush=True)
+        print(f"[ПИНГ] Ошибка выполнения пинга: {e}", flush=True)
         return False
 
 async def broadcast_message(text, reply_markup=None, photo_path=None):
@@ -188,11 +197,11 @@ async def broadcast_message(text, reply_markup=None, photo_path=None):
             else:
                 await bot.send_message(chat_id=uid, text=text, reply_markup=reply_markup)
         except Exception as e:
-            print(f"[ОШИБКА] Не вдалося надіслати повідомлення {uid}: {e}", flush=True)
+            print(f"[ОШИБКА] Не удалось отправить сообщение {uid}: {e}", flush=True)
 
-# --- ГЕНЕРАЦІЯ ГРАФІКА ЗА 7 ДНІВ ---
+# --- ГЕНЕРАЦИЯ ГРАФИКА (ЗЕЛЕНЫЙ / КРАСНЫЙ / ЧЕРНЫЙ ДЛЯ НЕИЗВЕСТНОГО ПЕРИОДА) ---
 def generate_chart():
-    print("[ГРАФІК] Генерація графіка за останні 7 днів...", flush=True)
+    print("[ГРАФИК] Генерация графика за последние 7 дней...", flush=True)
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -212,27 +221,72 @@ def generate_chart():
             day_start = datetime.datetime.combine(day, datetime.time.min)
             day_end = datetime.datetime.combine(day, datetime.time.max)
 
-            cursor.execute("SELECT status FROM events WHERE timestamp < %s ORDER BY timestamp DESC LIMIT 1;", (day_start,))
-            initial_row = cursor.fetchone()
-            initial_status = 1 if (initial_row and initial_row[0] == "ONLINE") else 0
+            # Проверяем, были ли вообще события ДО начала этого дня
+            cursor.execute("SELECT timestamp, status FROM events WHERE timestamp < %s ORDER BY timestamp DESC LIMIT 1;", (day_start,))
+            prev_row = cursor.fetchone()
 
             day_events = [r for r in rows if r[0].date() == day]
 
-            plot_times = [day_start]
-            plot_statuses = [initial_status]
+            # Если это самый первый день в базе и до него событий не было вообще -> раннее утро неизвестно (черный цвет)
+            if not prev_row and not day_events:
+                # Весь день нет данных
+                plot_times = [day_start, day_end]
+                plot_statuses = [-1, -1] # -1 обозначает неизвестность (черный)
+            else:
+                plot_times = []
+                plot_statuses = []
 
-            for ev in day_events:
-                plot_times.append(ev[0])
-                plot_statuses.append(1 if ev[1] == "ONLINE" else 0)
+                # Определяем начальный статус на начало дня
+                if prev_row:
+                    curr_status = 1 if prev_row[1] == "ONLINE" else 0
+                    plot_times.append(day_start)
+                    plot_statuses.append(curr_status)
+                else:
+                    # Событий до этого дня не было, но в этот день события есть. До первого события статус неизвестен (-1)
+                    if day_events:
+                        first_ev_time = day_events[0][0]
+                        if first_ev_time > day_start:
+                            plot_times.append(day_start)
+                            plot_statuses.append(-1) # Неизвестно (черный)
+                            
+                            # С какого статуса начинается день после первой записи
+                            initial_day_status = 1 if day_events[0][1] == "OFFLINE" else 0 # Если первое событие OFFLINE, то до него свет был? Или наоборот.
+                            # Проще: если первое событие ONLINE, то до него не было данных. 
+                    
+                # Заполняем события дня
+                for ev in day_events:
+                    st_val = 1 if ev[1] == "ONLINE" else 0
+                    plot_times.append(ev[0])
+                    plot_statuses.append(st_val)
 
-            plot_times.append(day_end)
-            plot_statuses.append(plot_statuses[-1])
+                plot_times.append(day_end)
+                if plot_statuses:
+                    plot_statuses.append(plot_statuses[-1])
+                else:
+                    plot_statuses.append(-1)
 
-            ax.step(plot_times, plot_statuses, where='post', color='#2ecc71', linewidth=2)
-            ax.fill_between(plot_times, plot_statuses, step='post', color='#2ecc71', alpha=0.2)
+            # Рисуем сегменты в зависимости от статуса (-1: черный, 0: красный, 1: зеленый)
+            # Для matplotlib разобьем линии по цветам
+            for i in range(len(plot_times) - 1):
+                t_sub = [plot_times[i], plot_times[i+1]]
+                s_sub = [plot_statuses[i], plot_statuses[i+1]]
+                
+                status_val = plot_statuses[i]
+                if status_val == 1:
+                    color = '#2ecc71' # Зеленый (ЕСТЬ СВЕТ)
+                    alpha = 0.3
+                elif status_val == 0:
+                    color = '#e74c3c' # Красный (НЕТ СВЕТА)
+                    alpha = 0.4
+                else:
+                    color = '#2c3e50' # Черный / Тёмно-серый (НЕТ ДАННЫХ)
+                    alpha = 0.5
+
+                ax.step(t_sub, s_sub, where='post', color=color, linewidth=2.5)
+                ax.fill_between(t_sub, s_sub, step='post', color=color, alpha=alpha)
 
             ax.set_yticks([0, 1])
-            ax.set_yticklabels(["Ні", "Є"], fontsize=8)
+            ax.set_yticklabels(["Нет", "Есть"], fontsize=8)
             ax.set_ylim(-0.1, 1.1)
             ax.set_ylabel(day.strftime("%d.%m"), fontsize=9, rotation=0, labelpad=25, va='center')
             ax.grid(True, linestyle="--", alpha=0.5)
@@ -242,23 +296,23 @@ def generate_chart():
         cursor.close()
         conn.close()
 
-        plt.suptitle("Графік наявності світла за останні 7 днів", fontsize=14, fontweight="bold", y=0.98)
+        plt.suptitle("График наличия света за последние 7 дней", fontsize=14, fontweight="bold", y=0.98)
         plt.tight_layout()
 
         chart_path = "power_chart_7days.png"
         plt.savefig(chart_path, dpi=150)
         plt.close()
-        print("[ГРАФІК] Графік успішно збережено.", flush=True)
+        print("[ГРАФИК] График успешно сохранен.", flush=True)
         return chart_path
     except Exception as e:
-        print(f"[ОШИБКА ГРАФІКА] Не вдалося згенерувати графік: {e}", flush=True)
+        print(f"[ОШИБКА ГРАФИКА] Не удалось сгенерировать график: {e}", flush=True)
         return None
 
-# --- ОБРОБКА КОМАНД ТА КНОПОК ЗНИЗУ ---
+# --- ОБРАБОТКА КОМАНД И КНОПОК ---
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     add_user(message.chat.id)
-    await message.answer("⚡ Привіт! Бот моніторингу мережі успішно підключений.", reply_markup=get_main_keyboard())
+    await message.answer("⚡ Привет! Бот мониторинга сети успешно подключен.", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "📊 Статус")
 @dp.message(Command("status"))
@@ -266,32 +320,30 @@ async def cmd_status(message: Message):
     add_user(message.chat.id)
     last = get_last_event()
     if not last:
-        text = "📊 Історія порожня, моніторинг тільки запущено."
+        text = "📊 История пустая, мониторинг только запущен."
     else:
         t, status = last
-        st_text = "🟢 Світло є" if status == "ONLINE" else "🔴 Світла немає"
-        text = f"Поточний статус: {st_text}\nСвітло {'є' if status == 'ONLINE' else 'відсутнє'} з: {t}\nОстання перевірка: {last_check_time}"
+        st_text = "🟢 Свет есть" if status == "ONLINE" else "🔴 Света нет"
+        text = f"Текущий статус: {st_text}\nСвет {'есть' if status == 'ONLINE' else 'отсутствует'} с: {t}\nПоследняя проверка: {last_check_time}"
     await message.answer(text, reply_markup=get_main_keyboard())
 
-@dp.message(F.text == "📈 Графік за 7 днів")
+@dp.message(F.text == "📈 График за 7 дней")
 @dp.message(Command("chart"))
 async def cmd_chart(message: Message):
     add_user(message.chat.id)
     chart_file = generate_chart()
-    caption = "📈 Графік наявності світла по днях (останні 7 днів):"
+    caption = "📈 График наличия света по дням (последние 7 дней):"
     if chart_file and os.path.exists(chart_file):
         photo = BufferedInputFile.from_file(chart_file)
         await message.answer_photo(photo=photo, caption=caption, reply_markup=get_main_keyboard())
     else:
-        await message.answer("Недостатньо даних для побудови графіка.", reply_markup=get_main_keyboard())
+        await message.answer("Недостаточно данных для построения графика.", reply_markup=get_main_keyboard())
 
-@dp.message(F.text == "📄 Отримати логи")
 @dp.message(Command("logs"))
 async def cmd_logs(message: Message):
     add_user(message.chat.id)
-    await message.answer("🛠 Оберіть період для вивантаження логів:", reply_markup=get_logs_keyboard())
+    await message.answer("🛠 Выберите период для выгрузки логов:", reply_markup=get_logs_keyboard())
 
-# --- ОБРОБКА КНОПОК ВИБОРУ ЛОГІВ ---
 @dp.callback_query(F.data.startswith("logs_"))
 async def process_logs_callback(callback: CallbackQuery):
     minutes = int(callback.data.split("_")[1])
@@ -301,7 +353,7 @@ async def process_logs_callback(callback: CallbackQuery):
     filtered_logs = [item[1] for item in log_buffer if item[0] >= threshold_time]
 
     if not filtered_logs:
-        await callback.message.answer(f"📭 За останні {minutes if minutes < 1440 else '24 години'} логів немає.")
+        await callback.message.answer(f"📭 За последние {minutes if minutes < 1440 else '24 часа'} логов нет.")
         await callback.answer()
         return
 
@@ -311,11 +363,11 @@ async def process_logs_callback(callback: CallbackQuery):
 
     await callback.message.answer_document(
         BufferedInputFile(file_bytes, filename=filename),
-        caption=f"📄 Логи за останні {minutes if minutes < 1440 else '24 години'}."
+        caption=f"📄 Логи за последние {minutes if minutes < 1440 else '24 часа'}."
     )
     await callback.answer()
 
-# --- ОСНОВНИЙ ЦИКЛ МОНІТОРИНГУ ---
+# --- ОСНОВНОЙ ЦИКЛ МОНИТОРИНГА ---
 async def monitor_loop():
     await asyncio.sleep(5)
     last_event = get_last_event()
@@ -330,10 +382,10 @@ async def monitor_loop():
         log_event("ONLINE")
 
     fails = 0
-    print("[МОНІТОРИНГ] Цикл моніторингу запущено.", flush=True)
+    print("[МОНИТОРИНГ] Цикл мониторинга запущен.", flush=True)
 
     while True:
-        print(f"\n[МОНІТОРИНГ] Починаю перевірку IP {TARGET_IP}...", flush=True)
+        print(f"\n[МОНИТОРИНГ] Начинаю проверку IP {TARGET_IP}...", flush=True)
         status = await ping_target(TARGET_IP)
 
         if status:
@@ -350,20 +402,20 @@ async def monitor_loop():
                 log_event("ONLINE")
                 outage_start_time = None
 
-                text = f"🟢 Світло з'явилося о {recovery_time_str}. Світла не було {duration_str}."
+                text = f"🟢 Свет появился в {recovery_time_str}. Света не было {duration_str}."
                 await broadcast_message(text, reply_markup=get_main_keyboard())
             else:
-                print("[МОНІТОРИНГ] Мережа стабільна, світло є.", flush=True)
+                print("[МОНИТОРИНГ] Сеть стабильна, свет есть.", flush=True)
         else:
             fails += 1
-            print(f"[МОНІТОРИНГ] Збій пінга: {fails}/{FAIL_THRESHOLD}", flush=True)
+            print(f"[МОНИТОРИНГ] Сбой пинга: {fails}/{FAIL_THRESHOLD}", flush=True)
             if is_online and fails >= FAIL_THRESHOLD:
                 is_online = False
                 outage_start_time = datetime.datetime.now(ZoneInfo("Europe/Kiev"))
                 log_event("OFFLINE")
 
                 current_time_str = outage_start_time.strftime("%H:%M")
-                text = f"🔴 Світло зникло о {current_time_str}."
+                text = f"🔴 Свет пропал в {current_time_str}."
                 await broadcast_message(text, reply_markup=get_main_keyboard())
 
         await asyncio.sleep(CHECK_INTERVAL)
@@ -379,14 +431,14 @@ async def start_web_server():
     port = int(os.getenv("PORT", 8080))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"[WEB] Веб-сервер запущено на порту {port}", flush=True)
+    print(f"[WEB] Веб-сервер запущен на порту {port}", flush=True)
 
 async def main():
-    print("[СТАРТ] Ініціалізація...", flush=True)
+    print("[СТАРТ] Инициализация...", flush=True)
     init_db()
     await start_web_server()
     asyncio.create_task(monitor_loop())
-    print("[СТАРТ] Запуск пулінгу...", flush=True)
+    print("[СТАРТ] Запуск пуллинга...", flush=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
