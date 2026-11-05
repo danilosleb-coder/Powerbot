@@ -91,6 +91,13 @@ def init_db():
         );
     """)
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS pings (
+            id SERIAL PRIMARY KEY,
+            timestamp TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+            latency FLOAT NOT NULL
+        );
+    """)
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             chat_id BIGINT PRIMARY KEY
         );
@@ -137,6 +144,18 @@ def log_event(status):
     except Exception as e:
         print(f"[ОШИБКА БД] Не удалось записать событие: {e}", flush=True)
 
+def log_ping(latency):
+    now = datetime.datetime.now(ZoneInfo("Europe/Kiev")).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO pings (timestamp, latency) VALUES (%s, %s);", (now, latency))
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        pass
+
 def get_last_event():
     try:
         conn = get_db_connection()
@@ -178,6 +197,7 @@ async def ping_target(ip):
         
         if is_success:
             ms_val = round(delay, 1)
+            log_ping(ms_val)
             print(f"[ПИНГ] Проверка {ip} -> Успешно | Отклик: {ms_val} ms | TTL: 64", flush=True)
             return True
         else:
@@ -290,7 +310,7 @@ async def monitor_loop():
 
         await asyncio.sleep(CHECK_INTERVAL)
 
-# --- ВЕБ-СЕРВЕР И ПРОПОРЦИОНАЛЬНЫЙ ТАЙМЛАЙН-ДАШБОРД ---
+# --- ВЕБ-СЕРВЕР И ДАШБОРД С ТОЧНОЙ ЛОГИКОЙ СТРЕЛОК ---
 async def handle_root(request):
     return web.Response(text="Power Bot Web Service is running!")
 
@@ -300,13 +320,17 @@ async def handle_dashboard(request):
         cursor = conn.cursor()
         cursor.execute("SELECT timestamp, status FROM events ORDER BY timestamp ASC;")
         rows = cursor.fetchall()
+        cursor.execute("SELECT timestamp, latency FROM pings ORDER BY timestamp ASC;")
+        ping_rows = cursor.fetchall()
         cursor.close()
         conn.close()
     except Exception as e:
         print(f"[WEB DASHBOARD ERROR] {e}", flush=True)
         rows = []
+        ping_rows = []
 
     now_kyiv = datetime.datetime.now(ZoneInfo("Europe/Kiev"))
+    today_date = now_kyiv.date()
     days = [(now_kyiv - datetime.timedelta(days=6 - i)) for i in range(7)]
     
     ru_weekdays = {
@@ -319,73 +343,154 @@ async def handle_dashboard(request):
         6: 'Воскресенье'
     }
 
-    days_data = []
+    def format_time_readable(minutes):
+        if minutes is None or minutes <= 0:
+            return "0 мин."
+        h = int(minutes // 60)
+        m = int(round(minutes % 60))
+        if h > 0 and m > 0:
+            return f"{h} ч. {m} мин."
+        elif h > 0:
+            return f"{h} ч."
+        return f"{m} мин."
+
+    raw_days_stats = []
+
     for day in days:
         day_date = day.date()
-        day_start = datetime.datetime.combine(day_date, datetime.time.min, tzinfo=ZoneInfo("Europe/Kiev"))
-        day_end = datetime.datetime.combine(day_date, datetime.time.max, tzinfo=ZoneInfo("Europe/Kiev"))
-        
-        # Статус на начало дня (00:00)
-        past_events = [r for r in rows if (r[0].replace(tzinfo=ZoneInfo("Europe/Kiev")) if r[0].tzinfo is None else r[0]) < day_start]
-        last_st = "UNKNOWN"
-        if past_events:
-            last_st = past_events[-1][1]
-        
-        # События внутри этого дня
-        day_events = [r for r in rows if day_start <= (r[0].replace(tzinfo=ZoneInfo("Europe/Kiev")) if r[0].tzinfo is None else r[0]) <= day_end]
-        
-        # Строим пропорциональные интервалы в минутах от 0 до 1440 (24 часа)
-        current_min = 0.0
-        current_st = last_st
-        intervals = []
-        
-        for ev in day_events:
-            ev_dt = ev[0].replace(tzinfo=ZoneInfo("Europe/Kiev")) if ev[0].tzinfo is None else ev[0]
-            ev_min = ev_dt.hour * 60 + ev_dt.minute + ev_dt.second / 60.0
-            
-            if ev_min > current_min:
-                intervals.append((current_min, ev_min, current_st))
-            current_min = ev_min
-            current_st = ev[1]
-            
-        if current_min < 1440.0:
-            intervals.append((current_min, 1440.0, current_st))
-            
-        # Форматируем в проценты для CSS
-        css_segments = []
-        for start_m, end_m, st in intervals:
-            duration = end_m - start_m
-            if duration <= 0:
-                continue
-            width_pct = (duration / 1440.0) * 100
-            left_pct = (start_m / 1440.0) * 100
-            
-            if st == "ONLINE":
-                bg_color = "#10b981" # Зеленый
-                status_name = "Свет есть"
-            elif st == "OFFLINE":
-                bg_color = "#ef4444" # Красный
-                status_name = "Света нет"
-            else:
-                bg_color = "#1e293b" # Черный/темно-серый (нет инфы)
-                status_name = "Нет информации"
-                
-            start_str = f"{int(start_m // 60):02d}:{int(start_m % 60):02d}"
-            end_str = f"{int(end_m // 60):02d}:{int(end_m % 60):02d}"
-            
-            css_segments.append({
-                "left": left_pct,
-                "width": width_pct,
-                "color": bg_color,
-                "tooltip": f"{start_str} - {end_str}: {status_name}"
-            })
-            
         weekday_name = ru_weekdays[day_date.weekday()]
         date_str_formatted = f"{day_date.strftime('%d.%m')} ({weekday_name})"
 
-        days_data.append({
+        if day_date > today_date:
+            raw_days_stats.append({
+                "date_str": date_str_formatted,
+                "segments": [],
+                "offline_mins": None,
+                "online_mins": None,
+                "avg_ping": None,
+                "has_data": False
+            })
+            continue
+
+        day_start = datetime.datetime.combine(day_date, datetime.time.min, tzinfo=ZoneInfo("Europe/Kiev"))
+        day_end = datetime.datetime.combine(day_date, datetime.time.max, tzinfo=ZoneInfo("Europe/Kiev"))
+        
+        if day_date == today_date:
+            end_limit_min = now_kyiv.hour * 60 + now_kyiv.minute + now_kyiv.second / 60.0
+        else:
+            end_limit_min = 1440.0
+
+        if end_limit_min <= 0:
+            raw_days_stats.append({
+                "date_str": date_str_formatted,
+                "segments": [],
+                "offline_mins": None,
+                "online_mins": None,
+                "avg_ping": None,
+                "has_data": False
+            })
+            continue
+
+        past_events = [r for r in rows if (r[0].replace(tzinfo=ZoneInfo("Europe/Kiev")) if r[0].tzinfo is None else r[0]) < day_start]
+        current_st = past_events[-1][1] if past_events else None
+        
+        day_events = []
+        for r in rows:
+            ev_dt = r[0].replace(tzinfo=ZoneInfo("Europe/Kiev")) if r[0].tzinfo is None else r[0]
+            if day_start <= ev_dt <= day_end:
+                ev_min = ev_dt.hour * 60 + ev_dt.minute + ev_dt.second / 60.0
+                if ev_min <= end_limit_min:
+                    day_events.append((ev_min, r[1]))
+
+        current_min = 0.0
+        css_segments = []
+        offline_mins = 0.0
+        online_mins = 0.0
+        has_data = (current_st is not None) or (len(day_events) > 0)
+
+        for ev_min, st in day_events:
+            if ev_min > current_min:
+                if current_st is not None:
+                    dur = ev_min - current_min
+                    if current_st == "ONLINE":
+                        online_mins += dur
+                    else:
+                        offline_mins += dur
+                    
+                    width_pct = (dur / 1440.0) * 100
+                    left_pct = (current_min / 1440.0) * 100
+                    bg_color = "#90f59a" if current_st == "ONLINE" else "#f07a7a"
+                    css_segments.append({"left": left_pct, "width": width_pct, "color": bg_color})
+                current_min = ev_min
+            current_st = st
+            
+        if current_min < end_limit_min:
+            if current_st is not None:
+                dur = end_limit_min - current_min
+                if current_st == "ONLINE":
+                    online_mins += dur
+                else:
+                    offline_mins += dur
+
+                width_pct = (dur / 1440.0) * 100
+                left_pct = (current_min / 1440.0) * 100
+                bg_color = "#90f59a" if current_st == "ONLINE" else "#f07a7a"
+                css_segments.append({"left": left_pct, "width": width_pct, "color": bg_color})
+
+        day_pings = []
+        for pr in ping_rows:
+            p_dt = pr[0].replace(tzinfo=ZoneInfo("Europe/Kiev")) if pr[0].tzinfo is None else pr[0]
+            if day_start <= p_dt <= day_end:
+                day_pings.append(pr[1])
+
+        avg_ping = round(sum(day_pings) / len(day_pings)) if day_pings else None
+
+        raw_days_stats.append({
             "date_str": date_str_formatted,
-            "segments": css_segments
+            "segments": css_segments,
+            "offline_mins": offline_mins if has_data else None,
+            "online_mins": online_mins if has_data else None,
+            "avg_ping": avg_ping,
+            "has_data": has_data
+        })
+
+    days_data = []
+    for i, curr in enumerate(raw_days_stats):
+        prev = raw_days_stats[i - 1] if i > 0 else None
+
+        # 1. Света не было: больше -> красный (↑), меньше -> зеленый (↓)
+        offline_symbol = '<span class="text-slate-400 font-bold ml-1">—</span>'
+        if curr["has_data"] and prev and prev["has_data"] and curr["offline_mins"] is not None and prev["offline_mins"] is not None:
+            if curr["offline_mins"] > prev["offline_mins"]:
+                offline_symbol = '<span class="text-red-500 font-extrabold ml-1">↑</span>'
+            elif curr["offline_mins"] < prev["offline_mins"]:
+                offline_symbol = '<span class="text-emerald-500 font-extrabold ml-1">↓</span>'
+
+        # 2. Свет был: больше -> зеленый (↑), меньше -> красный (↓)
+        online_symbol = '<span class="text-slate-400 font-bold ml-1">—</span>'
+        if curr["has_data"] and prev and prev["has_data"] and curr["online_mins"] is not None and prev["online_mins"] is not None:
+            if curr["online_mins"] > prev["online_mins"]:
+                online_symbol = '<span class="text-emerald-500 font-extrabold ml-1">↑</span>'
+            elif curr["online_mins"] < prev["online_mins"]:
+                online_symbol = '<span class="text-red-500 font-extrabold ml-1">↓</span>'
+
+        # 3. Пинг: выше -> красный (↑), ниже -> зеленый (↓)
+        ping_symbol = '<span class="text-slate-400 font-bold ml-1">—</span>'
+        if curr["has_data"] and prev and prev["has_data"] and curr["avg_ping"] is not None and prev["avg_ping"] is not None:
+            if curr["avg_ping"] > prev["avg_ping"]:
+                ping_symbol = '<span class="text-red-500 font-extrabold ml-1">↑</span>'
+            elif curr["avg_ping"] < prev["avg_ping"]:
+                ping_symbol = '<span class="text-emerald-500 font-extrabold ml-1">↓</span>'
+
+        days_data.append({
+            "date_str": curr["date_str"],
+            "segments": curr["segments"],
+            "offline_str": format_time_readable(curr["offline_mins"]) if curr["has_data"] else "--//--",
+            "online_str": format_time_readable(curr["online_mins"]) if curr["has_data"] else "--//--",
+            "ping_str": f"{curr['avg_ping']} мс" if curr["avg_ping"] is not None else "--//--",
+            "offline_symbol": offline_symbol if curr["has_data"] else "",
+            "online_symbol": online_symbol if curr["has_data"] else "",
+            "ping_symbol": ping_symbol if curr["has_data"] else ""
         })
 
     days_json = json.dumps(days_data)
@@ -402,7 +507,7 @@ async def handle_dashboard(request):
     </head>
     <body class="bg-slate-100 text-slate-800 font-sans antialiased p-4 min-h-screen">
         <div class="max-w-xl mx-auto space-y-4" id="cards-container">
-            <!-- Динамические карточки дней -->
+            <!-- Карточки дней -->
         </div>
 
         <script>
@@ -418,15 +523,15 @@ async def handle_dashboard(request):
                 
                 let segmentsHtml = '';
                 day.segments.forEach(seg => {{
-                    segmentsHtml += `<div class="absolute h-full top-0 transition-all hover:opacity-90" style="left: ${{seg.left}}%; width: ${{seg.width}}%; background-color: ${{seg.color}};" title="${{seg.tooltip}}"></div>`;
+                    segmentsHtml += `<div class="absolute h-full top-0 transition-all" style="left: ${{seg.left}}%; width: ${{seg.width}}%; background-color: ${{seg.color}};"></div>`;
                 }});
 
                 card.innerHTML = `
                     <div class="flex justify-between items-center mb-2">
                         <span class="text-sm font-bold text-slate-800">${{day.date_str}}</span>
                     </div>
-                    <!-- Шкала времени на 100% высоты -->
-                    <div class="relative h-10 w-full bg-slate-900 rounded-xl overflow-hidden shadow-inner flex">
+                    <!-- Шкала времени -->
+                    <div class="relative h-10 w-full bg-white border border-slate-200 rounded-xl overflow-hidden shadow-inner flex">
                         ${{segmentsHtml}}
                     </div>
                     <!-- Метки времени -->
@@ -437,9 +542,28 @@ async def handle_dashboard(request):
                         <span>18:00</span>
                         <span>23:59</span>
                     </div>
+                    <!-- Статистика со строгой цветовой логикой стрелок -->
+                    <div class="mt-3 pt-3 border-t border-slate-100 grid grid-cols-3 gap-2 text-center">
+                        <div class="bg-slate-50 p-2 rounded-xl">
+                            <span class="text-[10px] text-slate-400 block font-medium">Света не было</span>
+                            <span class="text-xs font-bold text-slate-700 mt-0.5 inline-flex items-center justify-center">${{day.offline_str}}${{day.offline_symbol}}</span>
+                        </div>
+                        <div class="bg-slate-50 p-2 rounded-xl">
+                            <span class="text-[10px] text-slate-400 block font-medium">Свет был</span>
+                            <span class="text-xs font-bold text-slate-700 mt-0.5 inline-flex items-center justify-center">${{day.online_str}}${{day.online_symbol}}</span>
+                        </div>
+                        <div class="bg-slate-50 p-2 rounded-xl">
+                            <span class="text-[10px] text-slate-400 block font-medium">Средний отклик</span>
+                            <span class="text-xs font-bold text-slate-700 mt-0.5 inline-flex items-center justify-center">${{day.ping_str}}${{day.ping_symbol}}</span>
+                        </div>
+                    </div>
                 `;
                 container.appendChild(card);
             }});
+
+            setTimeout(() => {{
+                location.reload();
+            }}, 30000);
         </script>
     </body>
     </html>
