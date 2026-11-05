@@ -205,9 +205,9 @@ async def broadcast_message(text, reply_markup=None, photo_path=None):
         except Exception as e:
             print(f"[ОШИБКА] Не удалось отправить сообщение {uid}: {e}", flush=True)
 
-# --- ГЕНЕРАЦИЯ ГРАФИКА ЧЕРЕЗ PLOTLY ---
+# --- ГЕНЕРАЦИЯ ГРАФИКА ЧЕРЕЗ TAIMELINE (BROKEN_BARH) ---
 def generate_chart():
-    print("[ГРАФИК] Генерация графика Plotly за последние 7 дней...", flush=True)
+    print("[ГРАФИК] Генерация таймлайна...", flush=True)
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -219,41 +219,39 @@ def generate_chart():
         now_kyiv = datetime.datetime.now(ZoneInfo("Europe/Kiev"))
         days = [(now_kyiv - datetime.timedelta(days=6 - i)).date() for i in range(7)]
         
-        fig = go.Figure()
+        fig, ax = plt.subplots(figsize=(10, 6))
 
-        # Цветовая гамма
         colors = {
             "ONLINE": "#2ecc71",   # Зеленый
             "OFFLINE": "#e74c3c",  # Красный
-            "UNKNOWN": "#2c3e50"   # Серый / Черный (Нет данных)
+            "UNKNOWN": "#2c3e50"   # Серый (Нет данных)
         }
 
+        y_labels = []
+        y_ticks = []
+
         for idx, day in enumerate(days):
+            y_pos = idx * 10
+            y_ticks.append(y_pos + 5)
+            y_labels.append(day.strftime("%d.%m"))
+
             day_start = datetime.datetime.combine(day, datetime.time.min)
             day_end = datetime.datetime.combine(day, datetime.time.max)
-            day_label = day.strftime("%d.%m")
+            day_start_sec = day_start.timestamp()
+            day_end_sec = day_end.timestamp()
 
             day_events = [r for r in rows if r[0].date() == day]
 
             if not day_events:
-                # Если за день нет вообще записей — рисуем один сплошной блок «Нет данных»
-                fig.add_trace(go.Bar(
-                    x=[datetime.timedelta(hours=24)],
-                    y=[day_label],
-                    orientation='h',
-                    base=[day_start],
-                    marker=dict(color=colors["UNKNOWN"], opacity=0.6),
-                    showlegend=False,
-                    hoverinfo='skip'
-                ))
+                # Если данных нет — рисуем серый блок на весь день
+                duration = day_end_sec - day_start_sec
+                ax.broken_barh([(day_start_sec, duration)], (y_pos, 8), facecolors=colors["UNKNOWN"], alpha=0.5)
             else:
-                # Определяем статус до начала дня
                 past_events = [r for r in rows if r[0] < day_start]
                 last_st = "UNKNOWN"
                 if past_events:
                     last_st = past_events[-1][1]
 
-                # Формируем интервалы внутри дня
                 intervals = []
                 current_time = day_start
                 current_status = last_st
@@ -261,55 +259,42 @@ def generate_chart():
                 for ev in day_events:
                     ev_time = ev[0]
                     if ev_time > current_time:
-                        intervals.append((current_time, ev_time, current_status))
+                        intervals.append((current_time.timestamp(), (ev_time - current_time).total_seconds(), current_status))
                     current_time = ev_time
                     current_status = ev[1]
 
                 if current_time < day_end:
-                    intervals.append((current_time, day_end, current_status))
+                    intervals.append((current_time.timestamp(), (day_end - current_time).total_seconds(), current_status))
 
-                # Добавляем каждый интервал на график
-                for start_t, end_t, status in intervals:
-                    duration = end_t - start_t
+                for start_sec, dur_sec, status in intervals:
                     color = colors.get(status, colors["UNKNOWN"])
-                    fig.add_trace(go.Bar(
-                        x=[duration],
-                        y=[day_label],
-                        orientation='h',
-                        base=[start_t],
-                        marker=dict(color=color, opacity=0.7),
-                        showlegend=False,
-                        hoverinfo='skip'
-                    ))
+                    ax.broken_barh([(start_sec, dur_sec)], (y_pos, 8), facecolors=color, alpha=0.7)
 
-        # Настройка внешнего вида (современный дашборд)
-        fig.update_layout(
-            title=dict(text="<b>График наличия света за последние 7 дней</b>", x=0.5, font=dict(size=16)),
-            xaxis=dict(
-                type='date',
-                tickformat='%H:%M',
-                range=[datetime.datetime.combine(days[0], datetime.time.min), datetime.datetime.combine(days[-1], datetime.time.max)],
-                gridcolor='lightgray'
-            ),
-            yaxis=dict(
-                title="",
-                categoryorder='array',
-                categoryarray=[d.strftime("%d.%m") for d in days]
-            ),
-            barmode='stack',
-            plot_bgcolor='white',
-            paper_bgcolor='white',
-            margin=dict(l=50, r=20, t=50, b=50),
-            height=600,
-            width=900
-        )
+        # Настройка осей под временную шкалу
+        ax.set_yticks(y_ticks)
+        ax.set_yticklabels(y_labels, fontsize=10, fontweight="bold")
+        
+        # Форматирование оси X в часы
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M', tz=ZoneInfo("Europe/Kiev")))
+        
+        # Устанавливаем границы по первому и последнему дню
+        xmin = datetime.datetime.combine(days[0], datetime.time.min).timestamp()
+        xmax = datetime.datetime.combine(days[-1], datetime.time.max).timestamp()
+        ax.set_xlim(xmin, xmax)
 
+        ax.set_ylim(-2, len(days) * 10 + 2)
+        ax.grid(True, linestyle="--", alpha=0.5, axis='x')
+        plt.title("График наличия света за последние 7 дней", fontsize=14, fontweight="bold", pad=15)
+        
+        plt.tight_layout()
         chart_path = "power_chart_7days.png"
-        fig.write_image(chart_path, scale=2)
-        print("[ГРАФИК] График Plotly успешно сохранен.", flush=True)
+        plt.savefig(chart_path, dpi=150)
+        plt.close()
+        
+        print("[ГРАФИК] Таймлайн успешно сохранен.", flush=True)
         return chart_path
     except Exception as e:
-        print(f"[ОШИБКА ГРАФИКА PLOTLY] Не удалось сгенерировать график: {e}", flush=True)
+        print(f"[ОШИБКА ГРАФИКА] {e}", flush=True)
         return None
 
 # --- ОБРАБОТКА КОМАНД И КНОПОК ---
