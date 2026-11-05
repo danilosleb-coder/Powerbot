@@ -118,6 +118,7 @@ def get_all_users():
         print(f"[ОШИБКА БД] Не удалось получить список пользователей: {e}", flush=True)
         return []
 
+# Обычная функция логирования (с отправкой СМС в Telegram)
 def log_event(status):
     now = datetime.datetime.now(ZoneInfo("Europe/Kiev")).strftime("%Y-%m-%d %H:%M:%S")
     try:
@@ -130,6 +131,20 @@ def log_event(status):
         print(f"[БАЗА ДАННЫХ] Записано событие -> Статус: {status} | Время: {now}", flush=True)
     except Exception as e:
         print(f"[ОШИБКА БД] Не удалось записать событие: {e}", flush=True)
+
+# ТИХАЯ бэкенд-функция (ТОЛЬКО запись в БД, БЕЗ отправки в Telegram)
+def log_event_silent(status, custom_time=None):
+    now = custom_time if custom_time else datetime.datetime.now(ZoneInfo("Europe/Kiev")).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO events (timestamp, status) VALUES (%s, %s);", (now, status))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        print(f"[ТИХИЙ БЭКЕНД] Записано в БД -> Статус: {status} | Время: {now}", flush=True)
+    except Exception as e:
+        print(f"[ОШИБКА БД] Не удалось выполнить тихую запись: {e}", flush=True)
 
 def get_last_event():
     try:
@@ -193,14 +208,13 @@ async def broadcast_message(text, reply_markup=None, photo_path=None):
         except Exception as e:
             print(f"[ОШИБКА] Не удалось отправить сообщение {uid}: {e}", flush=True)
 
-# --- ГЕНЕРАЦИЯ ГРАФИКА (ЖЕЛЕЗОБЕТОННЫЙ ЕДИНЫЙ СТИЛЬ) ---
+# --- ГЕНЕРАЦИЯ ГРАФИКА ---
 def generate_chart():
     print("[ГРАФИК] Генерация графика за последние 7 дней...", flush=True)
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Забираем вообще ВСЕ события из базы, отсортированные по времени
         cursor.execute("SELECT timestamp, status FROM events ORDER BY timestamp ASC;")
         rows = cursor.fetchall()
 
@@ -213,25 +227,21 @@ def generate_chart():
             day_start = datetime.datetime.combine(day, datetime.time.min)
             day_end = datetime.datetime.combine(day, datetime.time.max)
 
-            # Фильтруем события конкретно для этого дня в памяти Python
             day_events = [r for r in rows if r[0].date() == day]
-
-            plot_times = []
-            plot_statuses = []
+            ax.set_xlim(day_start, day_end)
 
             if not day_events:
-                # Если за этот день вообще нет записей — рисуем ровную полосу «Нет данных» (0.5)
-                plot_times = [day_start, day_end]
-                plot_statuses = [0.5, 0.5]
+                # Если за день вообще нет записей — рисуем ровную линию «Нет данных» (0.5)
+                ax.plot([day_start, day_end], [0.5, 0.5], color='#2c3e50', linewidth=3, alpha=0.6)
+                ax.fill_between([day_start, day_end], 0, 1, color='#2c3e50', alpha=0.2)
             else:
-                # Ищем последнее событие ДО начала этого дня, чтобы узнать исходный статус
                 past_events = [r for r in rows if r[0] < day_start]
                 last_st = 0.5
                 if past_events:
                     last_st = 1 if past_events[-1][1] == "ONLINE" else 0
 
-                plot_times.append(day_start)
-                plot_statuses.append(last_st)
+                plot_times = [day_start]
+                plot_statuses = [last_st]
 
                 for ev in day_events:
                     plot_times.append(ev[0])
@@ -240,24 +250,23 @@ def generate_chart():
                 plot_times.append(day_end)
                 plot_statuses.append(plot_statuses[-1])
 
-            # Отрисовка сегментов графика
-            for i in range(len(plot_times) - 1):
-                t_sub = [plot_times[i], plot_times[i+1]]
-                s_sub = [plot_statuses[i], plot_statuses[i+1]]
-                
-                val = plot_statuses[i]
-                if val == 1:
-                    color = '#2ecc71' # Зеленый (Есть свет)
-                    alpha = 0.3
-                elif val == 0:
-                    color = '#e74c3c' # Красный (Нет света)
-                    alpha = 0.4
-                else:
-                    color = '#2c3e50' # Черный (Нет данных)
-                    alpha = 0.5
+                for i in range(len(plot_times) - 1):
+                    t_sub = [plot_times[i], plot_times[i+1]]
+                    s_sub = [plot_statuses[i], plot_statuses[i+1]]
+                    
+                    val = plot_statuses[i]
+                    if val == 1:
+                        color = '#2ecc71' # Зеленый
+                        alpha = 0.3
+                    elif val == 0:
+                        color = '#e74c3c' # Красный
+                        alpha = 0.4
+                    else:
+                        color = '#2c3e50' # Черный
+                        alpha = 0.5
 
-                ax.step(t_sub, s_sub, where='post', color=color, linewidth=3)
-                ax.fill_between(t_sub, s_sub, step='post', color=color, alpha=alpha)
+                    ax.step(t_sub, s_sub, where='post', color=color, linewidth=3)
+                    ax.fill_between(t_sub, s_sub, step='post', color=color, alpha=alpha)
 
             ax.set_yticks([0, 0.5, 1])
             ax.set_yticklabels(["Нет", "Нет данных", "Есть"], fontsize=8)
@@ -265,7 +274,6 @@ def generate_chart():
             ax.set_ylabel(day.strftime("%d.%m"), fontsize=9, rotation=0, labelpad=30, va='center')
             ax.grid(True, linestyle="--", alpha=0.5)
             ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-            ax.set_xlim(day_start, day_end)
 
         cursor.close()
         conn.close()
@@ -372,7 +380,7 @@ async def monitor_loop():
 
                 duration_str = format_duration(down_duration)
                 is_online = True
-                log_event("ONLINE")
+                log_event("ONLINE") # Реальное изменение со СМС в чат
                 outage_start_time = None
 
                 text = f"🟢 Свет появился в {recovery_time_str}. Света не было {duration_str}."
@@ -385,7 +393,7 @@ async def monitor_loop():
             if is_online and fails >= FAIL_THRESHOLD:
                 is_online = False
                 outage_start_time = datetime.datetime.now(ZoneInfo("Europe/Kiev"))
-                log_event("OFFLINE")
+                log_event("OFFLINE") # Реальное изменение со СМС в чат
 
                 current_time_str = outage_start_time.strftime("%H:%M")
                 text = f"🔴 Свет пропал в {current_time_str}."
