@@ -200,13 +200,11 @@ def generate_chart():
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        now_kyiv = datetime.datetime.now(ZoneInfo("Europe/Kiev"))
-        start_date = (now_kyiv - datetime.timedelta(days=6)).date()
-        start_dt = datetime.datetime.combine(start_date, datetime.time.min)
-        
-        cursor.execute("SELECT timestamp, status FROM events WHERE timestamp >= %s ORDER BY timestamp ASC;", (start_dt,))
+        # Забираем вообще ВСЕ события из базы, отсортированные по времени
+        cursor.execute("SELECT timestamp, status FROM events ORDER BY timestamp ASC;")
         rows = cursor.fetchall()
 
+        now_kyiv = datetime.datetime.now(ZoneInfo("Europe/Kiev"))
         days = [(now_kyiv - datetime.timedelta(days=6 - i)).date() for i in range(7)]
         fig, axes = plt.subplots(7, 1, figsize=(10, 10), sharex=True)
 
@@ -215,20 +213,22 @@ def generate_chart():
             day_start = datetime.datetime.combine(day, datetime.time.min)
             day_end = datetime.datetime.combine(day, datetime.time.max)
 
+            # Фильтруем события конкретно для этого дня в памяти Python
             day_events = [r for r in rows if r[0].date() == day]
 
             plot_times = []
             plot_statuses = []
 
             if not day_events:
-                # Жестко задаем линию «Нет данных» (0.5) на весь день, если записей нет
+                # Если за этот день вообще нет записей — рисуем ровную полосу «Нет данных» (0.5)
                 plot_times = [day_start, day_end]
                 plot_statuses = [0.5, 0.5]
             else:
-                cursor.execute("SELECT status FROM events WHERE timestamp < %s ORDER BY timestamp DESC LIMIT 1;", (day_start,))
-                prev_ev = cursor.fetchone()
-                
-                last_st = (1 if prev_ev[1] == "ONLINE" else 0) if prev_ev else 0.5
+                # Ищем последнее событие ДО начала этого дня, чтобы узнать исходный статус
+                past_events = [r for r in rows if r[0] < day_start]
+                last_st = 0.5
+                if past_events:
+                    last_st = 1 if past_events[-1][1] == "ONLINE" else 0
 
                 plot_times.append(day_start)
                 plot_statuses.append(last_st)
@@ -240,20 +240,20 @@ def generate_chart():
                 plot_times.append(day_end)
                 plot_statuses.append(plot_statuses[-1])
 
-            # Отрисовка всех сегментов
+            # Отрисовка сегментов графика
             for i in range(len(plot_times) - 1):
                 t_sub = [plot_times[i], plot_times[i+1]]
                 s_sub = [plot_statuses[i], plot_statuses[i+1]]
                 
                 val = plot_statuses[i]
                 if val == 1:
-                    color = '#2ecc71' # Зеленый
+                    color = '#2ecc71' # Зеленый (Есть свет)
                     alpha = 0.3
                 elif val == 0:
-                    color = '#e74c3c' # Красный
+                    color = '#e74c3c' # Красный (Нет света)
                     alpha = 0.4
                 else:
-                    color = '#2c3e50' # Черный / Серый (Нет данных)
+                    color = '#2c3e50' # Черный (Нет данных)
                     alpha = 0.5
 
                 ax.step(t_sub, s_sub, where='post', color=color, linewidth=3)
