@@ -9,7 +9,8 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiohttp import web
-import plotly.graph_objects as go
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import psycopg2
 
 # --- БУФЕР ЛОГІВ ---
@@ -243,7 +244,6 @@ def generate_chart():
             day_events = [r for r in rows if r[0].date() == day]
 
             if not day_events:
-                # Если данных нет — рисуем серый блок на весь день
                 duration = day_end_sec - day_start_sec
                 ax.broken_barh([(day_start_sec, duration)], (y_pos, 8), facecolors=colors["UNKNOWN"], alpha=0.5)
             else:
@@ -270,14 +270,11 @@ def generate_chart():
                     color = colors.get(status, colors["UNKNOWN"])
                     ax.broken_barh([(start_sec, dur_sec)], (y_pos, 8), facecolors=color, alpha=0.7)
 
-        # Настройка осей под временную шкалу
         ax.set_yticks(y_ticks)
         ax.set_yticklabels(y_labels, fontsize=10, fontweight="bold")
         
-        # Форматирование оси X в часы
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M', tz=ZoneInfo("Europe/Kiev")))
         
-        # Устанавливаем границы по первому и последнему дню
         xmin = datetime.datetime.combine(days[0], datetime.time.min).timestamp()
         xmax = datetime.datetime.combine(days[-1], datetime.time.max).timestamp()
         ax.set_xlim(xmin, xmax)
