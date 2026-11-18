@@ -293,14 +293,37 @@ async def cmd_graph_btn(message: Message):
     msg = ""
     if today_sched:
         today_str = datetime.datetime.now(ZoneInfo("Europe/Kiev")).strftime("%d.%m.%Y")
-        msg += f"📋 **График ДТЭК на сегодня ({today_str}):**\n"
+        
+        # Генерируем визуальную полоску из эмодзи для Телеграма
+        bar = ""
+        for item in today_sched:
+            st = item['status']
+            if st == 'ON':
+                bar += "🟩"
+            elif st in ['OFF_FIRST_30', 'OFF_SECOND_30']:
+                bar += "🟧"
+            else:
+                bar += "🟥"
+                
+        msg += f"📋 **График ДТЭК на сегодня ({today_str}):**\n{bar}\n00:   06:   12:   18:   24\n\n"
         for item in today_sched:
             msg += f"`{item['hour']}` | {item['desc']}\n"
         msg += "\n"
 
     if tomorrow_sched:
         tomorrow_str = (datetime.datetime.now(ZoneInfo("Europe/Kiev")) + datetime.timedelta(days=1)).strftime("%d.%m.%Y")
-        msg += f"📅 **График ДТЭК на завтра ({tomorrow_str}):**\n"
+        
+        bar_tom = ""
+        for item in tomorrow_sched:
+            st = item['status']
+            if st == 'ON':
+                bar_tom += "🟩"
+            elif st in ['OFF_FIRST_30', 'OFF_SECOND_30']:
+                bar_tom += "🟧"
+            else:
+                bar_tom += "🟥"
+                
+        msg += f"📅 **График ДТЭК на завтра ({tomorrow_str}):**\n{bar_tom}\n00:   06:   12:   18:   24\n\n"
         for item in tomorrow_sched:
             msg += f"`{item['hour']}` | {item['desc']}\n"
 
@@ -311,17 +334,92 @@ async def cmd_admin(message: Message):
     add_user(message.chat.id)
     await message.answer("🛠 **Панель администратора:**", parse_mode="Markdown", reply_markup=get_admin_keyboard())
 
+# --- АДМИН-МЕНЮ И ИЗМЕНЕНИЕ ХРОНОЛОГИИ ЗА 2 ДНЯ ---
+
 @dp.callback_query(F.data == "admin_set_status")
 async def cb_admin_set_status(callback: CallbackQuery):
-    await callback.message.edit_text("Выберите статус, который нужно присвоить текущему моменту:", reply_markup=get_status_override_keyboard())
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        # Берем события за последние 2 дня (48 часов)
+        two_days_ago = datetime.datetime.now(ZoneInfo("Europe/Kiev")) - datetime.timedelta(days=2)
+        cursor.execute("SELECT id, timestamp, status FROM events WHERE timestamp >= %s ORDER BY id DESC LIMIT 10;", (two_days_ago,))
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        if not rows:
+            await callback.message.edit_text("📭 За последние 2 дня нет записанных событий в базе.")
+            await callback.answer()
+            return
+
+        keyboard_buttons = []
+        status_emojis = {"ONLINE": "🟢", "RESERVE": "🟡", "OFFLINE": "🔴"}
+
+        for r_id, t, st in rows:
+            t_str = t.strftime("%d.%m %H:%M") if isinstance(t, datetime.datetime) else str(t)[5:16]
+            emoji = status_emojis.get(st, "⚪")
+            btn_text = f"{emoji} [{t_str}] {st}"
+            keyboard_buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"editevent_{r_id}")])
+
+        keyboard_buttons.append([InlineKeyboardButton(text="« Назад в админку", callback_data="admin_back")])
+        
+        await callback.message.edit_text(
+            "🛠 **Выберите событие для изменения за последние 2 дня:**",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+        )
+        await callback.answer()
+    except Exception as e:
+        await callback.message.edit_text(f"❌ Ошибка загрузки событий: {e}")
+        await callback.answer()
+
+@dp.callback_query(F.data.startswith("editevent_"))
+async def cb_select_event_to_edit(callback: CallbackQuery):
+    event_id = callback.data.split("_")[1]
+    await callback.message.edit_text(
+        f"🎯 Выбрано событие ID: `{event_id}`.\nКакой статус установить для этого периода?",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🟢 Свет", callback_data=f"saveev_{event_id}_ONLINE"),
+                InlineKeyboardButton(text="🟡 Резерв", callback_data=f"saveev_{event_id}_RESERVE"),
+                InlineKeyboardButton(text="🔴 Нет света", callback_data=f"saveev_{event_id}_OFFLINE")
+            ],
+            [InlineKeyboardButton(text="« К списку событий", callback_data="admin_set_status")]
+        ])
+    )
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("set_"))
-async def cb_set_status(callback: CallbackQuery):
-    new_status = callback.data.split("_")[1]
-    log_event(new_status)
-    status_names = {"ONLINE": "🟢 Свет есть", "RESERVE": "🟡 Резервное питание", "OFFLINE": "🔴 Света нет"}
-    await callback.message.edit_text(f"✅ Статус успешно изменен на: **{status_names.get(new_status, new_status)}**", parse_mode="Markdown")
+@dp.callback_query(F.data.startswith("saveev_"))
+async def cb_save_event_status(callback: CallbackQuery):
+    parts = callback.data.split("_")
+    event_id = parts[1]
+    new_status = parts[2]
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE events SET status = %s WHERE id = %s;", (new_status, event_id))
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        status_names = {"ONLINE": "🟢 Свет есть", "RESERVE": "🟡 Резервное питание", "OFFLINE": "🔴 Света нет"}
+        await callback.message.edit_text(
+            f"✅ Статус события ID `{event_id}` успешно изменен на: **{status_names.get(new_status, new_status)}**",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🛠 В админ-панель", callback_data="admin_back")]
+            ])
+        )
+    except Exception as e:
+        await callback.message.edit_text(f"❌ Ошибка обновления в базе: {e}")
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_back")
+async def cb_admin_back(callback: CallbackQuery):
+    await callback.message.edit_text("🛠 **Панель администратора:**", parse_mode="Markdown", reply_markup=get_admin_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data == "admin_check_dtek")
@@ -367,7 +465,7 @@ async def process_logs_callback(callback: CallbackQuery):
         caption=f"📄 Логи за выбранный период."
     )
     await callback.answer()
-
+    
 # --- МОНИТОРИНГ С ЛОГИКОЙ РЕЗЕРВНОГО ПИТАНИЯ ---
 async def monitor_loop():
     await asyncio.sleep(3)
@@ -752,16 +850,17 @@ async def handle_dashboard(request):
                     detailsHtml = '<div class="text-xs text-slate-400 text-center py-2">Нет подробных данных</div>';
                 }
 
-                card.innerHTML = `
-                    <div class="flex justify-between items-center mb-2 cursor-pointer select-none" onclick="toggleAccordion(${index})">
+                <div class="flex justify-between items-center mb-2 cursor-pointer select-none" onclick="toggleAccordion(${index})">
                         <span class="text-sm font-bold text-slate-800">${day.date_str}</span>
                         <svg id="arrow_${index}" class="w-4 h-4 text-slate-400 transition-transform duration-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
                         </svg>
                     </div>
+                    <!-- Фактическая шкала времени -->
                     <div class="relative h-10 w-full bg-white border border-slate-200 rounded-xl overflow-hidden shadow-inner flex">
                         ${segmentsHtml}
                     </div>
+                    <!-- Метки времени для факта -->
                     <div class="flex justify-between text-xs text-slate-500 mt-1.5 px-0.5 font-semibold">
                         <span>00:00</span>
                         <span>06:00</span>
@@ -771,12 +870,21 @@ async def handle_dashboard(request):
                     </div>
                     <div id="toast_${index}" class="hidden mt-2 p-2 bg-slate-800 text-white text-xs rounded-lg text-center font-medium"></div>
 
+                    <!-- Выпадающий аккордеон с плановым графиком ДТЭК и часами -->
                     <div id="accordion_${index}" style="max-height: 0px;" class="overflow-hidden transition-all duration-300 ease-in-out">
                         <div class="mt-3 pt-3 border-t border-slate-100 space-y-3">
                             <div>
                                 <span class="text-xs font-bold text-slate-500 block mb-1">📋 План от ДТЭК:</span>
                                 <div class="relative h-7 w-full bg-slate-50 border border-slate-200 rounded-lg overflow-hidden flex">
                                     ${dtekSegmentsHtml}
+                                </div>
+                                <!-- Метки времени для плана ДТЭК -->
+                                <div class="flex justify-between text-[10px] text-slate-400 mt-1 px-0.5 font-medium">
+                                    <span>00:00</span>
+                                    <span>06:00</span>
+                                    <span>12:00</span>
+                                    <span>18:00</span>
+                                    <span>23:59</span>
                                 </div>
                             </div>
                             <div class="space-y-1">
@@ -786,6 +894,7 @@ async def handle_dashboard(request):
                         </div>
                     </div>
 
+                    <!-- Статистика -->
                     <div class="mt-3 pt-3 border-t border-slate-100 grid grid-cols-3 gap-2 text-center">
                         <div class="bg-slate-50 p-2 rounded-xl">
                             <span class="text-[10px] text-slate-400 block font-medium">Света не было</span>
