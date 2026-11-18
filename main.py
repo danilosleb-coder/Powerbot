@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from ping3 import ping
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from dtek_checker import checker_main_loop
+from dtek_checker import checker_main_loop, run_dtek_check_manual
 from aiogram.types import (
     BufferedInputFile, Message, ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, WebAppInfo
@@ -16,7 +16,6 @@ from aiogram.types import (
 from aiohttp import web
 import psycopg2
 
-# --- БУФЕР ЛОГІВ ---
 log_buffer = deque(maxlen=2000)
 
 class LogInterceptor:
@@ -37,13 +36,12 @@ class LogInterceptor:
 
 sys.stdout = LogInterceptor()
 
-# --- НАЛАШТУВАННЯ ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "9285635116:AAH9tk30qN2xAcdM-ChCtr0kSWKT5XEMPik")
 TARGET_IP = "176.36.251.189"
 DATABASE_URL = os.getenv("DATABASE_URL")
 WEB_APP_URL = os.getenv("WEB_APP_URL", "https://powerbot-q183.onrender.com/dashboard")
 
-CHECK_INTERVAL = 30
+CHECK_INTERVAL = 5   # Пинг каждые 5 секунд
 FAIL_THRESHOLD = 2
 
 bot = Bot(token=BOT_TOKEN)
@@ -64,6 +62,9 @@ def get_main_keyboard():
         keyboard=[
             [
                 KeyboardButton(text="📊 Статус"),
+                KeyboardButton(text="📊 График")
+            ],
+            [
                 KeyboardButton(text="📈 Веб-Дашборд 🌐", web_app=WebAppInfo(url=WEB_APP_URL))
             ]
         ],
@@ -81,11 +82,30 @@ def get_logs_keyboard():
         ]
     )
 
+def get_admin_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ Изменить последний статус", callback_data="admin_set_status")],
+            [InlineKeyboardButton(text="🔄 Проверить график ДТЭК", callback_data="admin_check_dtek")],
+            [InlineKeyboardButton(text="📄 Выгрузить логи", callback_data="admin_logs")],
+            [InlineKeyboardButton(text="🔄 Перезагрузить бота", callback_data="admin_restart")]
+        ]
+    )
+
+def get_status_override_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🟢 Свет есть", callback_data="set_ONLINE"),
+                InlineKeyboardButton(text="🟡 Резерв", callback_data="set_RESERVE"),
+                InlineKeyboardButton(text="🔴 Света нет", callback_data="set_OFFLINE")
+            ]
+        ]
+    )
+
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
-    
-    # Создаем таблицу для графиков ДТЭК
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS dtek_schedules (
             id SERIAL PRIMARY KEY,
@@ -95,17 +115,13 @@ def init_db():
             is_tomorrow BOOLEAN DEFAULT FALSE
         );
     """)
-    
-    # Создаем таблицу событий (свет есть / нет)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS events (
             id SERIAL PRIMARY KEY,
             timestamp TIMESTAMP WITHOUT TIME ZONE NOT NULL,
-            status VARCHAR(10) NOT NULL
+            status VARCHAR(20) NOT NULL
         );
     """)
-    
-    # Создаем таблицу пингов
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS pings (
             id SERIAL PRIMARY KEY,
@@ -113,18 +129,15 @@ def init_db():
             latency FLOAT NOT NULL
         );
     """)
-    
-    # Создаем таблицу пользователей бота
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             chat_id BIGINT PRIMARY KEY
         );
     """)
-    
     conn.commit()
     cursor.close()
     conn.close()
-    print("[БАЗА ДАННЫХ] Инициализация PostgreSQL в Supabase прошла успешно.", flush=True)
+    print("[БАЗА ДАННЫХ] Инициализация прошла успешно.", flush=True)
 
 def add_user(chat_id):
     try:
@@ -135,7 +148,7 @@ def add_user(chat_id):
         cursor.close()
         conn.close()
     except Exception as e:
-        print(f"[ОШИБКА БД] Не удалось добавить пользователя: {e}", flush=True)
+        print(f"[ОШИБКА БД] {e}", flush=True)
 
 def get_all_users():
     try:
@@ -147,7 +160,6 @@ def get_all_users():
         conn.close()
         return [row[0] for row in rows]
     except Exception as e:
-        print(f"[ОШИБКА БД] Не удалось получить список пользователей: {e}", flush=True)
         return []
 
 def log_event(status):
@@ -161,7 +173,7 @@ def log_event(status):
         conn.close()
         print(f"[БАЗА ДАННЫХ] Записано событие -> Статус: {status} | Время: {now}", flush=True)
     except Exception as e:
-        print(f"[ОШИБКА БД] Не удалось записать событие: {e}", flush=True)
+        print(f"[ОШИБКА БД] {e}", flush=True)
 
 def log_ping(latency):
     now = datetime.datetime.now(ZoneInfo("Europe/Kiev")).strftime("%Y-%m-%d %H:%M:%S")
@@ -172,7 +184,7 @@ def log_ping(latency):
         conn.commit()
         cursor.close()
         conn.close()
-    except Exception as e:
+    except Exception:
         pass
 
 def get_last_event():
@@ -187,8 +199,22 @@ def get_last_event():
             t_str = row[0].strftime("%Y-%m-%d %H:%M:%S") if isinstance(row[0], datetime.datetime) else str(row[0])
             return t_str, row[1]
         return None
-    except Exception as e:
-        print(f"[ОШИБКА БД] Ошибка get_last_event: {e}", flush=True)
+    except Exception:
+        return None
+
+def get_schedule_from_db(is_tomorrow=False):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        target_date = (datetime.datetime.now(ZoneInfo("Europe/Kiev")) + datetime.timedelta(days=1 if is_tomorrow else 0)).strftime("%Y-%m-%d")
+        cursor.execute("SELECT schedule_json FROM dtek_schedules WHERE schedule_date = %s AND is_tomorrow = %s ORDER BY id DESC LIMIT 1;", (target_date, is_tomorrow))
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        if row:
+            return row[0]
+        return None
+    except Exception:
         return None
 
 def format_duration(seconds):
@@ -197,7 +223,6 @@ def format_duration(seconds):
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
     secs = int(seconds % 60)
-
     parts = []
     if hours > 0:
         parts.append(f"{hours} ч.")
@@ -209,21 +234,18 @@ def format_duration(seconds):
 async def ping_target(ip):
     global last_check_time
     last_check_time = get_kyiv_time()
-    
     try:
-        delay = ping(ip, timeout=3, unit='ms')
+        delay = ping(ip, timeout=2, unit='ms')
         is_success = delay is not None and delay is not False
-        
         if is_success:
             ms_val = round(delay, 1)
             log_ping(ms_val)
-            print(f"[ПИНГ] Проверка {ip} -> Успешно | Отклик: {ms_val} ms | TTL: 64", flush=True)
+            print(f"[ПИНГ] Проверка {ip} -> Успешно | Отклик: {ms_val} ms", flush=True)
             return True
         else:
             print(f"[ПИНГ] Проверка {ip} -> Неуспешно (Нет ответа)", flush=True)
             return False
-    except Exception as e:
-        print(f"[ПИНГ] Ошибка выполнения пинга: {e}", flush=True)
+    except Exception:
         return False
 
 async def broadcast_message(text, reply_markup=None):
@@ -232,13 +254,13 @@ async def broadcast_message(text, reply_markup=None):
         try:
             await bot.send_message(chat_id=uid, text=text, reply_markup=reply_markup)
         except Exception as e:
-            print(f"[ОШИБКА] Не удалось отправить сообщение {uid}: {e}", flush=True)
+            print(f"[ОШИБКА] {e}", flush=True)
 
-# --- ОБРАБОТКА КОМАНД И КНОПОК ---
+# --- КОМАНДЫ БОТА ---
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     add_user(message.chat.id)
-    await message.answer("⚡ Привет! Бот мониторинга сети успешно подключен.", reply_markup=get_main_keyboard())
+    await message.answer("⚡ Привет! Бот мониторинга сети успешно запущен.", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "📊 Статус")
 @dp.message(Command("status"))
@@ -246,12 +268,78 @@ async def cmd_status(message: Message):
     add_user(message.chat.id)
     last = get_last_event()
     if not last:
-        text = "📊 История пустая, мониторинг только запущен."
+        text = "📊 История пустая."
     else:
         t, status = last
-        st_text = "🟢 Свет есть" if status == "ONLINE" else "🔴 Света нет"
-        text = f"Текущий статус: {st_text}\nСвет {'есть' if status == 'ONLINE' else 'отсутствует'} с: {t}\nПоследняя проверка: {last_check_time}"
+        if status == "ONLINE":
+            st_text = "🟢 Свет есть"
+        elif status == "RESERVE":
+            st_text = "🟡 Резервное питание"
+        else:
+            st_text = "🔴 Света нет"
+        text = f"Текущий статус: {st_text}\nСобытие с: {t}\nПоследняя проверка: {last_check_time}"
     await message.answer(text, reply_markup=get_main_keyboard())
+
+@dp.message(F.text == "📊 График")
+async def cmd_graph_btn(message: Message):
+    add_user(message.chat.id)
+    today_sched = get_schedule_from_db(is_tomorrow=False)
+    tomorrow_sched = get_schedule_from_db(is_tomorrow=True)
+    
+    if not today_sched and not tomorrow_sched:
+        await message.answer("📅 Плановый график еще не загружен из ДТЭК.")
+        return
+    
+    msg = ""
+    if today_sched:
+        today_str = datetime.datetime.now(ZoneInfo("Europe/Kiev")).strftime("%d.%m.%Y")
+        msg += f"📋 **График ДТЭК на сегодня ({today_str}):**\n"
+        for item in today_sched:
+            msg += f"`{item['hour']}` | {item['desc']}\n"
+        msg += "\n"
+
+    if tomorrow_sched:
+        tomorrow_str = (datetime.datetime.now(ZoneInfo("Europe/Kiev")) + datetime.timedelta(days=1)).strftime("%d.%m.%Y")
+        msg += f"📅 **График ДТЭК на завтра ({tomorrow_str}):**\n"
+        for item in tomorrow_sched:
+            msg += f"`{item['hour']}` | {item['desc']}\n"
+
+    await message.answer(msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
+
+@dp.message(Command("admin"))
+async def cmd_admin(message: Message):
+    add_user(message.chat.id)
+    await message.answer("🛠 **Панель администратора:**", parse_mode="Markdown", reply_markup=get_admin_keyboard())
+
+@dp.callback_query(F.data == "admin_set_status")
+async def cb_admin_set_status(callback: CallbackQuery):
+    await callback.message.edit_text("Выберите статус, который нужно присвоить текущему моменту:", reply_markup=get_status_override_keyboard())
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("set_"))
+async def cb_set_status(callback: CallbackQuery):
+    new_status = callback.data.split("_")[1]
+    log_event(new_status)
+    status_names = {"ONLINE": "🟢 Свет есть", "RESERVE": "🟡 Резервное питание", "OFFLINE": "🔴 Света нет"}
+    await callback.message.edit_text(f"✅ Статус успешно изменен на: **{status_names.get(new_status, new_status)}**", parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_check_dtek")
+async def cb_admin_check(callback: CallbackQuery):
+    await callback.answer("⏳ Запускаю проверку графика ДТЭК...")
+    res = await run_dtek_check_manual()
+    await callback.message.answer(res)
+
+@dp.callback_query(F.data == "admin_logs")
+async def cb_admin_logs(callback: CallbackQuery):
+    await callback.message.answer("🛠 Выберите период для выгрузки логов:", reply_markup=get_logs_keyboard())
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_restart")
+async def cb_admin_restart(callback: CallbackQuery):
+    await callback.message.answer("🔄 Перезапускаю бота...")
+    await callback.answer()
+    os.execv(sys.executable, ['python'] + sys.argv)
 
 @dp.message(Command("logs"))
 async def cmd_logs(message: Message):
@@ -265,9 +353,8 @@ async def process_logs_callback(callback: CallbackQuery):
     threshold_time = now_kyiv - datetime.timedelta(minutes=minutes)
 
     filtered_logs = [item[1] for item in log_buffer if item[0] >= threshold_time]
-
     if not filtered_logs:
-        await callback.message.answer(f"📭 За последние {minutes if minutes < 1440 else '24 часа'} логов нет.")
+        await callback.message.answer(f"📭 За выбранный период логов нет.")
         await callback.answer()
         return
 
@@ -277,59 +364,86 @@ async def process_logs_callback(callback: CallbackQuery):
 
     await callback.message.answer_document(
         BufferedInputFile(file_bytes, filename=filename),
-        caption=f"📄 Логи за последние {minutes if minutes < 1440 else '24 часа'}."
+        caption=f"📄 Логи за выбранный период."
     )
     await callback.answer()
 
+# --- МОНИТОРИНГ С ЛОГИКОЙ РЕЗЕРВНОГО ПИТАНИЯ ---
 async def monitor_loop():
-    await asyncio.sleep(5)
+    await asyncio.sleep(3)
     last_event = get_last_event()
-    is_online = last_event[1] == "ONLINE" if last_event else True
-    outage_start_time = None
-
-    if last_event and last_event[1] == "OFFLINE":
-        outage_start_time = datetime.datetime.strptime(last_event[0], "%Y-%m-%d %H:%M:%S")
+    current_status = last_event[1] if last_event else "ONLINE"
+    
+    # Исправление: корректное восстановление outage_start_time с таймзоной при перезапуске
+    if last_event and last_event[1] != "ONLINE":
+        try:
+            outage_start_time = datetime.datetime.strptime(last_event[0], "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("Europe/Kiev"))
+        except Exception:
+            outage_start_time = datetime.datetime.now(ZoneInfo("Europe/Kiev"))
+    else:
+        outage_start_time = None
 
     if not last_event:
         init_db()
         log_event("ONLINE")
 
     fails = 0
-    print("[МОНИТОРИНГ] Цикл мониторинга запущен.", flush=True)
+    print("[МОНИТОРИНГ] Цикл мониторинга запущен (каждые 5 сек).", flush=True)
 
     while True:
-        status = await ping_target(TARGET_IP)
+        ping_ok = await ping_target(TARGET_IP)
+        now = datetime.datetime.now(ZoneInfo("Europe/Kiev"))
+        
+        # Сверяемся с планом ДТЭК на текущий час с учетом получасовых интервалов
+        schedule = get_schedule_from_db(is_tomorrow=False)
+        scheduled_off = False
+        if schedule:
+            for item in schedule:
+                if item['hour'].startswith(f"{now.hour:02d}"):
+                    st = item['status']
+                    if st == 'OFF':
+                        scheduled_off = True
+                    elif st == 'OFF_FIRST_30' and now.minute < 30:
+                        scheduled_off = True
+                    elif st == 'OFF_SECOND_30' and now.minute >= 30:
+                        scheduled_off = True
+                    break
 
-        if status:
+        if ping_ok:
             fails = 0
-            if not is_online:
-                recovery_time_str = datetime.datetime.now(ZoneInfo("Europe/Kiev")).strftime("%H:%M")
+            if current_status in ["OFFLINE", "RESERVE"]:
                 if outage_start_time:
-                    down_duration = (datetime.datetime.now(ZoneInfo("Europe/Kiev")) - outage_start_time.replace(tzinfo=ZoneInfo("Europe/Kiev"))).total_seconds()
+                    down_duration = (now - outage_start_time).total_seconds()
                 else:
-                    down_duration = 60 
+                    down_duration = 60
 
-                duration_str = format_duration(down_duration)
-                is_online = True
-                log_event("ONLINE") 
+                if scheduled_off or down_duration <= 300:
+                    new_st = "RESERVE"
+                    text = f"🟡 Возобновление питания через резерв в {now.strftime('%H:%M')}."
+                else:
+                    new_st = "ONLINE"
+                    text = f"🟢 Свет появился в {now.strftime('%H:%M')}. Не было {format_duration(down_duration)}."
+
+                current_status = new_st
+                log_event(new_st)
                 outage_start_time = None
-
-                text = f"🟢 Свет появился в {recovery_time_str}. Света не было {duration_str}."
                 await broadcast_message(text, reply_markup=get_main_keyboard())
         else:
             fails += 1
-            if is_online and fails >= FAIL_THRESHOLD:
-                is_online = False
-                outage_start_time = datetime.datetime.now(ZoneInfo("Europe/Kiev"))
-                log_event("OFFLINE") 
-
-                current_time_str = outage_start_time.strftime("%H:%M")
-                text = f"🔴 Свет пропал в {current_time_str}."
+            if fails >= FAIL_THRESHOLD and current_status in ["ONLINE", "RESERVE"]:
+                fails = 0
+                outage_start_time = now
+                
+                new_st = "OFFLINE"
+                current_status = new_st
+                log_event(new_st)
+                
+                text = f"🔴 Свет пропал в {now.strftime('%H:%M')}."
                 await broadcast_message(text, reply_markup=get_main_keyboard())
 
         await asyncio.sleep(CHECK_INTERVAL)
 
-# --- ВЕБ-СЕРВЕР И ДАШБОРД ---
+# --- ВЕБ-СЕРВЕР И ДАШБОРД С ПЛАНОВЫМ ГРАФИКОМ ДТЭК ---
 async def handle_root(request):
     return web.Response(text="Power Bot Web Service is running!")
 
@@ -341,26 +455,25 @@ async def handle_dashboard(request):
         rows = cursor.fetchall()
         cursor.execute("SELECT timestamp, latency FROM pings ORDER BY timestamp ASC;")
         ping_rows = cursor.fetchall()
+        cursor.execute("SELECT schedule_date, schedule_json FROM dtek_schedules WHERE is_tomorrow = FALSE;")
+        dtek_rows = cursor.fetchall()
         cursor.close()
         conn.close()
     except Exception as e:
-        print(f"[WEB DASHBOARD ERROR] {e}", flush=True)
         rows = []
         ping_rows = []
+        dtek_rows = []
+
+    dtek_by_date = {}
+    for d_date, d_json in dtek_rows:
+        d_str = d_date.strftime("%Y-%m-%d") if isinstance(d_date, datetime.date) else str(d_date)
+        dtek_by_date[d_str] = d_json
 
     now_kyiv = datetime.datetime.now(ZoneInfo("Europe/Kiev"))
     today_date = now_kyiv.date()
     days = [(now_kyiv - datetime.timedelta(days=6 - i)) for i in range(7)]
     
-    ru_weekdays = {
-        0: 'Понедельник',
-        1: 'Вторник',
-        2: 'Среда',
-        3: 'Четверг',
-        4: 'Пятница',
-        5: 'Суббота',
-        6: 'Воскресенье'
-    }
+    ru_weekdays = {0: 'Понедельник', 1: 'Вторник', 2: 'Среда', 3: 'Четверг', 4: 'Пятница', 5: 'Суббота', 6: 'Воскресенье'}
 
     def format_time_readable(minutes):
         if minutes is None or minutes <= 0:
@@ -379,11 +492,48 @@ async def handle_dashboard(request):
         day_date = day.date()
         weekday_name = ru_weekdays[day_date.weekday()]
         date_str_formatted = f"{day_date.strftime('%d.%m')} ({weekday_name})"
+        date_iso_str = day_date.strftime("%Y-%m-%d")
+
+        # Корректная отрисовка плановых сегментов с учетом получасовых интервалов ДТЭК
+        dtek_segments = []
+        day_dtek_json = dtek_by_date.get(date_iso_str)
+        if day_dtek_json:
+            for item in day_dtek_json:
+                hour_range = item['hour'] # например "00-01"
+                try:
+                    start_h, end_h = map(int, hour_range.split('-'))
+                    base_left = (start_h / 24.0) * 100
+                    base_width = ((end_h - start_h) / 24.0) * 100
+                    
+                    st = item['status']
+                    if st == 'OFF_FIRST_30':
+                        width_val = base_width / 2.0
+                        left_val = base_left
+                        is_off = True
+                    elif st == 'OFF_SECOND_30':
+                        width_val = base_width / 2.0
+                        left_val = base_left + (base_width / 2.0)
+                        is_off = True
+                    else:
+                        width_val = base_width
+                        left_val = base_left
+                        is_off = (st == 'OFF' or 'Нет' in item['desc'])
+
+                    bg_col = "#fca5a5" if is_off else "#86efac"
+                    dtek_segments.append({
+                        "left": left_val,
+                        "width": width_val,
+                        "color": bg_col,
+                        "text": f"План ДТЭК ({item['hour']}): {item['desc']}"
+                    })
+                except Exception:
+                    pass
 
         if day_date > today_date:
             raw_days_stats.append({
                 "date_str": date_str_formatted,
                 "segments": [],
+                "dtek_segments": dtek_segments,
                 "details": [],
                 "offline_mins": None,
                 "online_mins": None,
@@ -395,25 +545,10 @@ async def handle_dashboard(request):
         day_start = datetime.datetime.combine(day_date, datetime.time.min, tzinfo=ZoneInfo("Europe/Kiev"))
         day_end = datetime.datetime.combine(day_date, datetime.time.max, tzinfo=ZoneInfo("Europe/Kiev"))
         
-        if day_date == today_date:
-            end_limit_min = now_kyiv.hour * 60 + now_kyiv.minute + now_kyiv.second / 60.0
-        else:
-            end_limit_min = 1440.0
-
-        if end_limit_min <= 0:
-            raw_days_stats.append({
-                "date_str": date_str_formatted,
-                "segments": [],
-                "details": [],
-                "offline_mins": None,
-                "online_mins": None,
-                "avg_ping": None,
-                "has_data": False
-            })
-            continue
+        end_limit_min = (now_kyiv.hour * 60 + now_kyiv.minute + now_kyiv.second / 60.0) if day_date == today_date else 1440.0
 
         past_events = [r for r in rows if (r[0].replace(tzinfo=ZoneInfo("Europe/Kiev")) if r[0].tzinfo is None else r[0]) < day_start]
-        current_st = past_events[-1][1] if past_events else None
+        current_st = past_events[-1][1] if past_events else "ONLINE"
         
         day_events = []
         for r in rows:
@@ -428,7 +563,7 @@ async def handle_dashboard(request):
         details_list = []
         offline_mins = 0.0
         online_mins = 0.0
-        has_data = (current_st is not None) or (len(day_events) > 0)
+        has_data = (len(day_events) > 0) or (current_st is not None)
 
         def min_to_str(m):
             hh = int(m // 60)
@@ -443,6 +578,10 @@ async def handle_dashboard(request):
                         online_mins += dur
                         st_name = "Свет был"
                         st_color = "text-emerald-600"
+                    elif current_st == "RESERVE":
+                        online_mins += dur
+                        st_name = "Резервное питание"
+                        st_color = "text-amber-500"
                     else:
                         offline_mins += dur
                         st_name = "Света не было"
@@ -450,15 +589,13 @@ async def handle_dashboard(request):
                     
                     width_pct = (dur / 1440.0) * 100
                     left_pct = (current_min / 1440.0) * 100
-                    bg_color = "#90f59a" if current_st == "ONLINE" else "#f07a7a"
+                    bg_color = "#90f59a" if current_st == "ONLINE" else ("#fde047" if current_st == "RESERVE" else "#f07a7a")
                     
                     start_t = min_to_str(current_min)
                     end_t = min_to_str(ev_min)
                     
                     css_segments.append({
-                        "left": left_pct, 
-                        "width": width_pct, 
-                        "color": bg_color,
+                        "left": left_pct, "width": width_pct, "color": bg_color,
                         "text": f"{st_name}: с {start_t} до {end_t} ({format_time_readable(dur)})"
                     })
                     details_list.append({
@@ -476,6 +613,10 @@ async def handle_dashboard(request):
                     online_mins += dur
                     st_name = "Свет был"
                     st_color = "text-emerald-600"
+                elif current_st == "RESERVE":
+                    online_mins += dur
+                    st_name = "Резервное питание"
+                    st_color = "text-amber-500"
                 else:
                     offline_mins += dur
                     st_name = "Света не было"
@@ -483,15 +624,13 @@ async def handle_dashboard(request):
 
                 width_pct = (dur / 1440.0) * 100
                 left_pct = (current_min / 1440.0) * 100
-                bg_color = "#90f59a" if current_st == "ONLINE" else "#f07a7a"
+                bg_color = "#90f59a" if current_st == "ONLINE" else ("#fde047" if current_st == "RESERVE" else "#f07a7a")
                 
                 start_t = min_to_str(current_min)
                 end_t = min_to_str(end_limit_min)
                 
                 css_segments.append({
-                    "left": left_pct, 
-                    "width": width_pct, 
-                    "color": bg_color,
+                    "left": left_pct, "width": width_pct, "color": bg_color,
                     "text": f"{st_name}: с {start_t} до {end_t} ({format_time_readable(dur)})"
                 })
                 details_list.append({
@@ -511,6 +650,7 @@ async def handle_dashboard(request):
         raw_days_stats.append({
             "date_str": date_str_formatted,
             "segments": css_segments,
+            "dtek_segments": dtek_segments,
             "details": details_list,
             "offline_mins": offline_mins if has_data else None,
             "online_mins": online_mins if has_data else None,
@@ -546,6 +686,7 @@ async def handle_dashboard(request):
         days_data.append({
             "date_str": curr["date_str"],
             "segments": curr["segments"],
+            "dtek_segments": curr["dtek_segments"],
             "details": curr["details"],
             "offline_str": format_time_readable(curr["offline_mins"]) if curr["has_data"] else "--//--",
             "online_str": format_time_readable(curr["online_mins"]) if curr["has_data"] else "--//--",
@@ -557,7 +698,6 @@ async def handle_dashboard(request):
 
     days_json = json.dumps(days_data)
 
-    # Обычный не-f-строчный шаблон HTML. Все JS скобки остаются чистыми!
     html_template = """
     <!DOCTYPE html>
     <html lang="ru">
@@ -589,6 +729,15 @@ async def handle_dashboard(request):
                     segmentsHtml += `<div class="absolute h-full top-0 transition-opacity active:opacity-75 cursor-pointer" style="left: ${seg.left}%; width: ${seg.width}%; background-color: ${seg.color};" onclick="showToast(event, ${index}, '${seg.text}')"></div>`;
                 });
 
+                let dtekSegmentsHtml = '';
+                if (day.dtek_segments && day.dtek_segments.length > 0) {
+                    day.dtek_segments.forEach(seg => {
+                        dtekSegmentsHtml += `<div class="absolute h-full top-0 opacity-80" style="left: ${seg.left}%; width: ${seg.width}%; background-color: ${seg.color};" title="${seg.text}"></div>`;
+                    });
+                } else {
+                    dtekSegmentsHtml = '<div class="flex items-center justify-center h-full text-xs text-slate-400">Нет данных графика ДТЭК</div>';
+                }
+
                 let detailsHtml = '';
                 if (day.details.length > 0) {
                     day.details.forEach(det => {
@@ -610,11 +759,9 @@ async def handle_dashboard(request):
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
                         </svg>
                     </div>
-                    <!-- Шкала времени -->
                     <div class="relative h-10 w-full bg-white border border-slate-200 rounded-xl overflow-hidden shadow-inner flex">
                         ${segmentsHtml}
                     </div>
-                    <!-- Метки времени -->
                     <div class="flex justify-between text-xs text-slate-500 mt-1.5 px-0.5 font-semibold">
                         <span>00:00</span>
                         <span>06:00</span>
@@ -622,17 +769,23 @@ async def handle_dashboard(request):
                         <span>18:00</span>
                         <span>23:59</span>
                     </div>
-                    <!-- Интерактивная всплывающая плашка по клику на шкалу -->
                     <div id="toast_${index}" class="hidden mt-2 p-2 bg-slate-800 text-white text-xs rounded-lg text-center font-medium"></div>
 
-                    <!-- Выпадающий аккордеон с плавной анимацией высоты -->
                     <div id="accordion_${index}" style="max-height: 0px;" class="overflow-hidden transition-all duration-300 ease-in-out">
-                        <div class="mt-3 pt-2 border-t border-slate-100 space-y-1">
-                            ${detailsHtml}
+                        <div class="mt-3 pt-3 border-t border-slate-100 space-y-3">
+                            <div>
+                                <span class="text-xs font-bold text-slate-500 block mb-1">📋 План от ДТЭК:</span>
+                                <div class="relative h-7 w-full bg-slate-50 border border-slate-200 rounded-lg overflow-hidden flex">
+                                    ${dtekSegmentsHtml}
+                                </div>
+                            </div>
+                            <div class="space-y-1">
+                                <span class="text-xs font-bold text-slate-500 block mb-1">⏱ Хронология событий:</span>
+                                ${detailsHtml}
+                            </div>
                         </div>
                     </div>
 
-                    <!-- Статистика -->
                     <div class="mt-3 pt-3 border-t border-slate-100 grid grid-cols-3 gap-2 text-center">
                         <div class="bg-slate-50 p-2 rounded-xl">
                             <span class="text-[10px] text-slate-400 block font-medium">Света не было</span>
@@ -669,10 +822,7 @@ async def handle_dashboard(request):
                 const toast = document.getElementById(`toast_${index}`);
                 toast.innerText = text;
                 toast.classList.remove('hidden');
-
-                setTimeout(() => {
-                    toast.classList.add('hidden');
-                }, 4000);
+                setTimeout(() => { toast.classList.add('hidden'); }, 4000);
             }
         </script>
     </body>
@@ -698,9 +848,8 @@ async def main():
     init_db()
     await start_web_server()
 
-    # Запускаем фоновые задачи параллельно
-    asyncio.create_task(monitor_loop())       # Пинги сети
-    asyncio.create_task(checker_main_loop())  # ДТЭК чекер (новый)
+    asyncio.create_task(monitor_loop())       # Пинги сети каждые 5 сек
+    asyncio.create_task(checker_main_loop())  # ДТЭК чекер
 
     print("[СТАРТ] Запуск пуллинга бота...", flush=True)
     await dp.start_polling(bot)
