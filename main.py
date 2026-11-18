@@ -85,21 +85,10 @@ def get_logs_keyboard():
 def get_admin_keyboard():
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="✏️ Изменить последний статус", callback_data="admin_set_status")],
+            [InlineKeyboardButton(text="✏️ Изменить статус (за 2 дня)", callback_data="admin_set_status")],
             [InlineKeyboardButton(text="🔄 Проверить график ДТЭК", callback_data="admin_check_dtek")],
             [InlineKeyboardButton(text="📄 Выгрузить логи", callback_data="admin_logs")],
             [InlineKeyboardButton(text="🔄 Перезагрузить бота", callback_data="admin_restart")]
-        ]
-    )
-
-def get_status_override_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🟢 Свет есть", callback_data="set_ONLINE"),
-                InlineKeyboardButton(text="🟡 Резерв", callback_data="set_RESERVE"),
-                InlineKeyboardButton(text="🔴 Света нет", callback_data="set_OFFLINE")
-            ]
         ]
     )
 
@@ -293,39 +282,16 @@ async def cmd_graph_btn(message: Message):
     msg = ""
     if today_sched:
         today_str = datetime.datetime.now(ZoneInfo("Europe/Kiev")).strftime("%d.%m.%Y")
-        
-        # Генерируем визуальную полоску из эмодзи для Телеграма
-        bar = ""
+        msg += f"📋 **График ДТЭК на сегодня ({today_str}):**\n\n"
         for item in today_sched:
-            st = item['status']
-            if st == 'ON':
-                bar += "🟩"
-            elif st in ['OFF_FIRST_30', 'OFF_SECOND_30']:
-                bar += "🟧"
-            else:
-                bar += "🟥"
-                
-        msg += f"📋 **График ДТЭК на сегодня ({today_str}):**\n{bar}\n00:   06:   12:   18:   24\n\n"
-        for item in today_sched:
-            msg += f"`{item['hour']}` | {item['desc']}\n"
+            msg += f"`{item['hour']}` — {item['desc']}\n"
         msg += "\n"
 
     if tomorrow_sched:
         tomorrow_str = (datetime.datetime.now(ZoneInfo("Europe/Kiev")) + datetime.timedelta(days=1)).strftime("%d.%m.%Y")
-        
-        bar_tom = ""
+        msg += f"📅 **График ДТЭК на завтра ({tomorrow_str}):**\n\n"
         for item in tomorrow_sched:
-            st = item['status']
-            if st == 'ON':
-                bar_tom += "🟩"
-            elif st in ['OFF_FIRST_30', 'OFF_SECOND_30']:
-                bar_tom += "🟧"
-            else:
-                bar_tom += "🟥"
-                
-        msg += f"📅 **График ДТЭК на завтра ({tomorrow_str}):**\n{bar_tom}\n00:   06:   12:   18:   24\n\n"
-        for item in tomorrow_sched:
-            msg += f"`{item['hour']}` | {item['desc']}\n"
+            msg += f"`{item['hour']}` — {item['desc']}\n"
 
     await message.answer(msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
@@ -341,7 +307,6 @@ async def cb_admin_set_status(callback: CallbackQuery):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        # Берем события за последние 2 дня (48 часов)
         two_days_ago = datetime.datetime.now(ZoneInfo("Europe/Kiev")) - datetime.timedelta(days=2)
         cursor.execute("SELECT id, timestamp, status FROM events WHERE timestamp >= %s ORDER BY id DESC LIMIT 10;", (two_days_ago,))
         rows = cursor.fetchall()
@@ -472,7 +437,6 @@ async def monitor_loop():
     last_event = get_last_event()
     current_status = last_event[1] if last_event else "ONLINE"
     
-    # Исправление: корректное восстановление outage_start_time с таймзоной при перезапуске
     if last_event and last_event[1] != "ONLINE":
         try:
             outage_start_time = datetime.datetime.strptime(last_event[0], "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("Europe/Kiev"))
@@ -492,7 +456,6 @@ async def monitor_loop():
         ping_ok = await ping_target(TARGET_IP)
         now = datetime.datetime.now(ZoneInfo("Europe/Kiev"))
         
-        # Сверяемся с планом ДТЭК на текущий час с учетом получасовых интервалов
         schedule = get_schedule_from_db(is_tomorrow=False)
         scheduled_off = False
         if schedule:
@@ -592,12 +555,11 @@ async def handle_dashboard(request):
         date_str_formatted = f"{day_date.strftime('%d.%m')} ({weekday_name})"
         date_iso_str = day_date.strftime("%Y-%m-%d")
 
-        # Корректная отрисовка плановых сегментов с учетом получасовых интервалов ДТЭК
         dtek_segments = []
         day_dtek_json = dtek_by_date.get(date_iso_str)
         if day_dtek_json:
             for item in day_dtek_json:
-                hour_range = item['hour'] # например "00-01"
+                hour_range = item['hour']
                 try:
                     start_h, end_h = map(int, hour_range.split('-'))
                     base_left = (start_h / 24.0) * 100
@@ -772,7 +734,7 @@ async def handle_dashboard(request):
             if curr["online_mins"] > prev["online_mins"]:
                 online_symbol = '<span class="text-emerald-500 font-extrabold ml-1">↑</span>'
             elif curr["online_mins"] < prev["online_mins"]:
-                online_symbol = '<span class="text-red-500 font-extrabold ml-1">↓</span>'
+                online_symbol = '<span class="text-emerald-500 font-extrabold ml-1">↓</span>'
 
         ping_symbol = '<span class="text-slate-400 font-bold ml-1">—</span>'
         if curr["has_data"] and prev and prev["has_data"] and curr["avg_ping"] is not None and prev["avg_ping"] is not None:
@@ -850,7 +812,8 @@ async def handle_dashboard(request):
                     detailsHtml = '<div class="text-xs text-slate-400 text-center py-2">Нет подробных данных</div>';
                 }
 
-                <div class="flex justify-between items-center mb-2 cursor-pointer select-none" onclick="toggleAccordion(${index})">
+                card.innerHTML = `
+                    <div class="flex justify-between items-center mb-2 cursor-pointer select-none" onclick="toggleAccordion(${index})">
                         <span class="text-sm font-bold text-slate-800">${day.date_str}</span>
                         <svg id="arrow_${index}" class="w-4 h-4 text-slate-400 transition-transform duration-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
