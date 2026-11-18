@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from ping3 import ping
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
+from dtek_checker import checker_main_loop
 from aiogram.types import (
     BufferedInputFile, Message, ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, WebAppInfo
@@ -83,6 +84,19 @@ def get_logs_keyboard():
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
+    
+    # Создаем таблицу для графиков ДТЭК
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS dtek_schedules (
+            id SERIAL PRIMARY KEY,
+            schedule_date DATE NOT NULL,
+            fetched_at TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+            schedule_json JSONB NOT NULL,
+            is_tomorrow BOOLEAN DEFAULT FALSE
+        );
+    """)
+    
+    # Создаем таблицу событий (свет есть / нет)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS events (
             id SERIAL PRIMARY KEY,
@@ -90,6 +104,8 @@ def init_db():
             status VARCHAR(10) NOT NULL
         );
     """)
+    
+    # Создаем таблицу пингов
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS pings (
             id SERIAL PRIMARY KEY,
@@ -97,11 +113,14 @@ def init_db():
             latency FLOAT NOT NULL
         );
     """)
+    
+    # Создаем таблицу пользователей бота
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             chat_id BIGINT PRIMARY KEY
         );
     """)
+    
     conn.commit()
     cursor.close()
     conn.close()
@@ -678,8 +697,12 @@ async def main():
     print("[СТАРТ] Инициализация...", flush=True)
     init_db()
     await start_web_server()
-    asyncio.create_task(monitor_loop())
-    print("[СТАРТ] Запуск пуллинга...", flush=True)
+
+    # Запускаем фоновые задачи параллельно
+    asyncio.create_task(monitor_loop())       # Пинги сети
+    asyncio.create_task(checker_main_loop())  # ДТЭК чекер (новый)
+
+    print("[СТАРТ] Запуск пуллинга бота...", flush=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
