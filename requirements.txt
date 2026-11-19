@@ -3,3 +3,4 @@ aiohttp==3.10.5
 ping3
 psycopg2-binary
 playwright
+pillow
