@@ -8,7 +8,7 @@ import aiohttp
 import psycopg2
 from playwright.async_api import async_playwright
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9285635116:AAH9tk30qN2xAcdM-ChCtr0kSWKT5XEMPik")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 DTEK_STREET = "Ніжинська"
